@@ -5,10 +5,11 @@ An OpenAI-backed continuous voice chat interface built with Vite, React, Tailwin
 ## Run locally
 
 1. Copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
-2. Run `npm install`.
+2. Set the supported models in `.env` if your provider differs from the defaults: `gpt-4o-mini-transcribe`, `gpt-5.6-luna`, and `gpt-audio-mini`.
+3. Run `npm install`.
 3. Run `npm run dev` and open `http://localhost:5173`.
 
-Speak naturally after starting a session. Echo records when it detects speech and sends a turn after a short pause. The Node service transcribes the recording, generates a matching-language response, and returns synthesized speech.
+Speak naturally after starting a session. A local Silero VAD detects speech and sends a turn after a short pause. The Node service transcribes with `gpt-4o-mini-transcribe`, generates a reply with `gpt-5.6-luna`, then requests a WAV voice response from `gpt-audio-mini`.
 
 ## Commands
 

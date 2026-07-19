@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm:dev:server\" \"npm:dev:web\"",
-    "dev:web": "vite",
-    "dev:server": "node --watch server/index.js",
-    "build": "tsc -b && vite build",
+    "dev:web": "npm run prepare:vad && vite",
+    "dev:server": "node server/index.js",
+    "build": "npm run prepare:vad && tsc -b && vite build",
+    "prepare:vad": "node scripts/copy-vad-assets.mjs",
     "start": "node server/index.js",
     "test": "node --test server/**/*.test.js"
   },
   "dependencies": {
+    "@ricky0123/vad-web": "^0.0.30",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^5.1.0",
