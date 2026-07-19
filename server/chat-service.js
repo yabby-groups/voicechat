@@ -41,6 +41,12 @@ export function createOpenAIClient(apiKey, baseURL, requestTimeoutMs) {
   });
 }
 
+function languageInstruction(language) {
+  if (language === 'zh') return 'Reply only in Simplified Chinese.';
+  if (language === 'en') return 'Reply only in English.';
+  return 'Reply in the same language as the user.';
+}
+
 async function synthesizeSpeech(client, text, language, audioModel, voice) {
   const stream = await client.chat.completions.create({
     model: audioModel,
@@ -49,9 +55,11 @@ async function synthesizeSpeech(client, text, language, audioModel, voice) {
     stream: true,
     messages: [{
       role: 'user',
-      content: language?.startsWith('zh')
+      content: language === 'zh'
         ? `请自然、温和地朗读以下内容，不要添加任何文字：${text}`
-        : `Read the following naturally and warmly. Do not add any words: ${text}`,
+        : language === 'en'
+          ? `Read the following naturally and warmly. Do not add any words: ${text}`
+          : `Read the following naturally and warmly in the language of the provided text. Do not add any words: ${text}`,
     }],
   });
   const audioChunks = [];
@@ -63,15 +71,59 @@ async function synthesizeSpeech(client, text, language, audioModel, voice) {
   return { audio: pcm16ToWavBase64(audioChunks), mimeType: 'audio/wav' };
 }
 
-export async function respondToMessage({ apiKey, baseURL, requestTimeoutMs, chatModel, audioModel, audioVoice, text, history = [], language }) {
+export async function streamAudioReply(client, {
+  audioModel, audioVoice, text, history = [], language, onAudioChunk, includeAudio = true,
+}) {
+  const stream = await client.chat.completions.create({
+    model: audioModel,
+    modalities: ['text', 'audio'],
+    audio: { voice: audioVoice, format: 'pcm16' },
+    stream: true,
+    messages: [
+      {
+        role: 'system',
+        content:
+          `You are Echo, a thoughtful voice companion. ${languageInstruction(language)} Keep spoken answers concise, natural, and useful. Do not use markdown.`,
+      },
+      ...normalizeHistory(history),
+      { role: 'user', content: text },
+    ],
+  });
+  const audioChunks = [];
+  const textChunks = [];
+  const transcriptChunks = [];
+  let audioChunkCount = 0;
+  for await (const chunk of stream) {
+    const delta = chunk.choices[0]?.delta;
+    if (delta?.audio?.data) {
+      audioChunkCount += 1;
+      if (includeAudio) audioChunks.push(Buffer.from(delta.audio.data, 'base64'));
+      onAudioChunk?.(delta.audio.data);
+    }
+    if (typeof delta?.content === 'string') textChunks.push(delta.content);
+    if (typeof delta?.audio?.transcript === 'string') transcriptChunks.push(delta.audio.transcript);
+  }
+  if (!audioChunkCount) throw new Error('The audio model did not return playable speech data.');
+  const assistantText = textChunks.join('').trim() || transcriptChunks.join('').trim();
+  if (!assistantText) throw new Error('The audio model did not return a text transcript.');
+  return {
+    assistantText,
+    ...(includeAudio ? { audio: pcm16ToWavBase64(audioChunks), mimeType: 'audio/wav' } : {}),
+  };
+}
+
+export async function respondToMessage({ apiKey, baseURL, requestTimeoutMs, chatModel, audioModel, audioVoice, audioResponseMode = 'direct', text, history = [], language }) {
   const client = createOpenAIClient(apiKey, baseURL, requestTimeoutMs);
+  if (audioResponseMode !== 'two_stage') {
+    return streamAudioReply(client, { audioModel, audioVoice, text, history, language });
+  }
   const response = await client.responses.create({
     model: chatModel,
     input: [
       {
         role: 'system',
         content:
-          'You are Echo, a thoughtful voice companion. Reply in the same language as the user. Keep spoken answers concise, natural, and useful. Do not use markdown.',
+          `You are Echo, a thoughtful voice companion. ${languageInstruction(language)} Keep spoken answers concise, natural, and useful. Do not use markdown.`,
       },
       ...normalizeHistory(history),
       { role: 'user', content: text },
