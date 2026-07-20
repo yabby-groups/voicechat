@@ -1,5 +1,6 @@
-export type Role = 'user' | 'assistant';
-export type VoiceStatus = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error';
+export type Role = "user" | "assistant";
+export type VoiceStatus =
+  "idle" | "listening" | "thinking" | "speaking" | "error";
 
 export type ChatMessage = {
   id: string;
