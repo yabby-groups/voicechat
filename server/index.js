@@ -2,6 +2,7 @@ import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
+import path from 'node:path';
 import { createOpenAIClient, respondToMessage, streamAudioReply, transcribeAudio } from './chat-service.js';
 
 const app = express();
@@ -21,6 +22,7 @@ const openAIConfig = {
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+app.use(express.static(path.join(process.cwd(), 'dist')));
 
 function readHistory(value) {
   if (!value) return [];
