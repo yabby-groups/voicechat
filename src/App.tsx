@@ -13,8 +13,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import type { MicVAD } from "@ricky0123/vad-web";
-import type { ChatMessage, ChatResult, VoiceStatus } from "./types";
+import type { ChatMessage, VoiceStatus } from "./types";
 
 const STORAGE_KEY = "echo-voicechat-history-v1";
 const VOICE_STORAGE_KEY = "echo-voicechat-voice-v1";
@@ -36,11 +35,6 @@ const VOICE_OPTIONS = [
 ] as const;
 type LanguagePreference = "auto" | "zh" | "en";
 type MobileTab = "voice" | "chat";
-declare global {
-  interface Window {
-    vad?: { MicVAD: typeof MicVAD };
-  }
-}
 const initialMessage: ChatMessage = {
   id: "welcome",
   role: "assistant",
@@ -48,70 +42,6 @@ const initialMessage: ChatMessage = {
   createdAt: new Date().toISOString(),
   language: "en",
 };
-function debug(event: string, details = "") {
-  console.info(`[Echo] ${event}${details ? ` ${details}` : ""}`);
-}
-
-function wavFromSamples(samples: Float32Array, sampleRate = 16000) {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-  const write = (offset: number, value: string) =>
-    Array.from(value).forEach((char, index) =>
-      view.setUint8(offset + index, char.charCodeAt(0)),
-    );
-  write(0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  write(8, "WAVE");
-  write(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  write(36, "data");
-  view.setUint32(40, samples.length * 2, true);
-  samples.forEach((sample, index) =>
-    view.setInt16(
-      44 + index * 2,
-      Math.max(-1, Math.min(1, sample)) * 0x7fff,
-      true,
-    ),
-  );
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
-type AudioStreamEvent =
-  | { type: "transcript"; text: string; language?: string }
-  | { type: "audio"; data: string }
-  | { type: "complete"; assistantText: string; language?: string }
-  | { type: "error"; error: string };
-
-async function readAudioStream(
-  response: Response,
-  onEvent: (event: AudioStreamEvent) => Promise<void> | void,
-) {
-  if (!response.body)
-    throw new Error("The voice response did not include a stream.");
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let pending = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    pending += decoder.decode(value, { stream: !done });
-    let lineEnd = pending.indexOf("\n");
-    while (lineEnd >= 0) {
-      const line = pending.slice(0, lineEnd).trim();
-      pending = pending.slice(lineEnd + 1);
-      if (line) await onEvent(JSON.parse(line) as AudioStreamEvent);
-      lineEnd = pending.indexOf("\n");
-    }
-    if (done) break;
-  }
-  if (pending.trim()) await onEvent(JSON.parse(pending) as AudioStreamEvent);
-}
-
 function getStoredMessages(): ChatMessage[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
@@ -178,17 +108,21 @@ export default function App() {
   const [isStarting, setIsStarting] = useState(false);
   const [startupProgress, setStartupProgress] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
-  const vadRef = useRef<MicVAD | null>(null);
   const historyRef = useRef(messages);
   const mutedRef = useRef(muted);
-  const requestInFlightRef = useRef(false);
   const startingRef = useRef(false);
-  const lastLevelUpdateRef = useRef(0);
   const autoListenRef = useRef(autoListen);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const playbackContextRef = useRef<AudioContext | null>(null);
   const playbackEndsAtRef = useRef(0);
   const messageListRef = useRef<HTMLDivElement | null>(null);
-  const sendAudioRef = useRef<((blob: Blob) => Promise<void>) | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const socketReadyRef = useRef<Promise<void> | null>(null);
+  const resolveReadyRef = useRef<(() => void) | null>(null);
+  const rejectReadyRef = useRef<((error: Error) => void) | null>(null);
+  const intentionalCloseRef = useRef(false);
+  const streamRef = useRef<MediaStream | null>(null);
+  const captureContextRef = useRef<AudioContext | null>(null);
+  const captureNodeRef = useRef<AudioWorkletNode | null>(null);
 
   useEffect(() => {
     historyRef.current = messages;
@@ -212,7 +146,6 @@ export default function App() {
   useEffect(() => {
     autoListenRef.current = autoListen;
   }, [autoListen]);
-  useEffect(() => () => stopListening(), []);
   useEffect(() => {
     if (!settingsOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -227,50 +160,31 @@ export default function App() {
     [],
   );
 
-  const playAudio = useCallback(async (result: ChatResult) => {
-    if (mutedRef.current || !result.audio) return;
-    debug("playback_start", `audio_chars=${result.audio.length}`);
-    setStatus("speaking");
-    const audio = new Audio(`data:${result.mimeType};base64,${result.audio}`);
-    await new Promise<void>((resolve) => {
-      audio.onended = () => {
-        debug("playback_end");
-        setStatus((current) =>
-          current === "speaking" ? "listening" : current,
-        );
-        resolve();
-      };
-      audio.onerror = () => {
-        setError("The reply was received, but its audio could not be played.");
-        setStatus("listening");
-        resolve();
-      };
-      void audio.play().catch(() => {
-        setError("The reply was received, but its audio could not be played.");
-        resolve();
-      });
-    });
+  const stopMicrophone = useCallback(() => {
+    captureNodeRef.current?.disconnect();
+    captureNodeRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    void captureContextRef.current?.close();
+    captureContextRef.current = null;
+    setAudioLevel(0);
   }, []);
 
-  const queuePcmAudio = useCallback(async (base64: string) => {
-    if (mutedRef.current) return;
+  const queuePcmAudio = useCallback(async (pcm: ArrayBuffer) => {
+    if (mutedRef.current || pcm.byteLength < 2) return;
     const context =
-      audioContextRef.current || new AudioContext({ sampleRate: 24000 });
-    audioContextRef.current = context;
+      playbackContextRef.current || new AudioContext({ sampleRate: 24000 });
+    playbackContextRef.current = context;
     if (context.state === "suspended") await context.resume();
-    const encoded = atob(base64);
-    if (encoded.length < 2) return;
     const audioBuffer = context.createBuffer(
       1,
-      Math.floor(encoded.length / 2),
+      Math.floor(pcm.byteLength / 2),
       24000,
     );
+    const view = new DataView(pcm);
     const channel = audioBuffer.getChannelData(0);
     for (let index = 0; index < channel.length; index += 1) {
-      const offset = index * 2;
-      const sample =
-        encoded.charCodeAt(offset) | (encoded.charCodeAt(offset + 1) << 8);
-      channel[index] = (sample >= 0x8000 ? sample - 0x10000 : sample) / 0x8000;
+      channel[index] = view.getInt16(index * 2, true) / 0x8000;
     }
     const source = context.createBufferSource();
     source.buffer = audioBuffer;
@@ -285,7 +199,7 @@ export default function App() {
   }, []);
 
   const waitForQueuedAudio = useCallback(async () => {
-    const context = audioContextRef.current;
+    const context = playbackContextRef.current;
     if (!context || playbackEndsAtRef.current <= context.currentTime) return;
     const delayMs = Math.ceil(
       (playbackEndsAtRef.current - context.currentTime) * 1000,
@@ -293,269 +207,159 @@ export default function App() {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
   }, []);
 
-  const sendText = useCallback(
-    async (text: string, language?: string) => {
-      const normalized = text.trim();
-      if (!normalized) return;
-      if (requestInFlightRef.current) return;
-      requestInFlightRef.current = true;
-      await vadRef.current?.pause();
-      const userMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "user",
-        text: normalized,
-        createdAt: new Date().toISOString(),
-        language,
-      };
-      addMessage(userMessage);
-      setStatus("thinking");
-      setError("");
-      setDraft("");
-      try {
-        debug("text_request_start", `text_chars=${normalized.length}`);
-        const selectedLanguage =
-          languagePreference === "auto" ? language : languagePreference;
-        const response = await fetch("/api/chat/text", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: normalized,
-            language: selectedLanguage,
-            voice,
-            history: historyRef.current,
-          }),
-        });
-        debug("text_request_response", `status=${response.status}`);
-        const result = (await response.json()) as ChatResult & {
-          error?: string;
-        };
-        if (!response.ok)
-          throw new Error(result.error || "Echo could not respond.");
-        addMessage({
-          id: crypto.randomUUID(),
-          role: "assistant",
-          text: result.assistantText,
-          createdAt: new Date().toISOString(),
-          language,
-        });
-        await playAudio(result);
-        setStatus((current) =>
-          current === "thinking" ? "listening" : current,
-        );
-      } catch (caught) {
-        setError(
-          caught instanceof Error ? caught.message : "Echo could not respond.",
-        );
-        setStatus("error");
-      } finally {
-        requestInFlightRef.current = false;
-        if (autoListenRef.current) void vadRef.current?.start();
+  const connectSocket = useCallback(async () => {
+    if (socketReadyRef.current) return socketReadyRef.current;
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${location.host}/api/chat/ws`);
+    socket.binaryType = "arraybuffer";
+    socketRef.current = socket;
+    socketReadyRef.current = new Promise<void>((resolve, reject) => {
+      resolveReadyRef.current = resolve;
+      rejectReadyRef.current = reject;
+    });
+    socket.onopen = () => socket.send(JSON.stringify({ type: "session", voice, language: languagePreference, history: historyRef.current }));
+    socket.onmessage = (event) => {
+      if (typeof event.data !== "string") {
+        void queuePcmAudio(event.data as ArrayBuffer);
+        return;
       }
-    },
-    [addMessage, languagePreference, playAudio, voice],
-  );
-
-  const sendAudio = useCallback(
-    async (blob: Blob) => {
-      if (blob.size < 1800) return;
-      if (requestInFlightRef.current) return;
-      requestInFlightRef.current = true;
-      await vadRef.current?.pause();
-      setStatus("thinking");
-      setError("");
-      const body = new FormData();
-      const extension = blob.type === "audio/wav" ? "wav" : "webm";
-      body.append("audio", blob, `voice-note.${extension}`);
-      body.append("history", JSON.stringify(historyRef.current));
-      body.append("voice", voice);
-      if (languagePreference !== "auto")
-        body.append("language", languagePreference);
-      try {
-        debug("audio_request_start", `bytes=${blob.size} mime=${blob.type}`);
+      const message = JSON.parse(event.data) as { type: string; text?: string; assistantText?: string; language?: string; error?: string };
+      if (message.type === "ready") {
+        resolveReadyRef.current?.();
+        resolveReadyRef.current = null;
+        return;
+      }
+      if (message.type === "speech_started") {
+        setAudioLevel(1);
+        return;
+      }
+      if (message.type === "turn_started") {
+        stopMicrophone();
         playbackEndsAtRef.current = 0;
-        const response = await fetch("/api/chat/audio/stream", {
-          method: "POST",
-          body,
-        });
-        debug("audio_request_response", `status=${response.status}`);
-        if (!response.ok) {
-          const result = (await response.json()) as { error?: string };
-          throw new Error(result.error || "Echo could not understand that.");
-        }
-        let completed = false;
-        await readAudioStream(response, async (event) => {
-          if (event.type === "error")
-            throw new Error(event.error || "Echo could not respond.");
-          if (event.type === "transcript") {
-            addMessage({
-              id: crypto.randomUUID(),
-              role: "user",
-              text: event.text,
-              createdAt: new Date().toISOString(),
-              language: event.language,
-            });
-            return;
-          }
-          if (event.type === "audio") {
-            await queuePcmAudio(event.data);
-            return;
-          }
-          completed = true;
-          addMessage({
-            id: crypto.randomUUID(),
-            role: "assistant",
-            text: event.assistantText,
-            createdAt: new Date().toISOString(),
-            language: event.language,
-          });
-        });
-        if (!completed)
-          throw new Error("The voice response ended before completion.");
-        await waitForQueuedAudio();
-        setStatus("listening");
-      } catch (caught) {
-        setError(
-          caught instanceof Error ? caught.message : "Voice request failed.",
-        );
-        setStatus("error");
-      } finally {
-        requestInFlightRef.current = false;
-        if (autoListenRef.current) void vadRef.current?.start();
+        setStatus("thinking");
+        return;
       }
-    },
-    [addMessage, languagePreference, queuePcmAudio, voice, waitForQueuedAudio],
-  );
+      if (message.type === "transcript" && message.text) {
+        addMessage({ id: crypto.randomUUID(), role: "user", text: message.text, createdAt: new Date().toISOString(), language: message.language });
+        return;
+      }
+      if (message.type === "complete" && message.assistantText) {
+        addMessage({ id: crypto.randomUUID(), role: "assistant", text: message.assistantText, createdAt: new Date().toISOString(), language: message.language });
+        void waitForQueuedAudio().then(() => {
+          if (autoListenRef.current) void startMicrophone();
+          setStatus(autoListenRef.current ? "listening" : "idle");
+        });
+        return;
+      }
+      if (message.type === "error") {
+        setError(message.error || "Voice request failed.");
+        setStatus("error");
+      }
+    };
+    socket.onerror = () => rejectReadyRef.current?.(new Error("WebSocket connection failed."));
+    socket.onclose = () => {
+      socketRef.current = null;
+      socketReadyRef.current = null;
+      rejectReadyRef.current?.(new Error("Voice connection closed."));
+      rejectReadyRef.current = null;
+      if (!intentionalCloseRef.current) {
+        stopMicrophone();
+        setAutoListen(false);
+        setError("Voice connection closed.");
+        setStatus("error");
+      }
+      intentionalCloseRef.current = false;
+    };
+    return socketReadyRef.current;
+  }, [addMessage, languagePreference, queuePcmAudio, stopMicrophone, voice, waitForQueuedAudio]);
 
-  useEffect(() => {
-    sendAudioRef.current = sendAudio;
-  }, [sendAudio]);
+  const startMicrophone = useCallback(async () => {
+    if (streamRef.current || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true } });
+    const context = new AudioContext();
+    const source = context.createMediaStreamSource(stream);
+    const worklet = `class PcmCapture extends AudioWorkletProcessor { constructor(){super();this.samples=[];this.position=0;this.step=sampleRate/16000;} process(inputs){const input=inputs[0][0];if(!input)return true;while(this.position<input.length){this.samples.push(input[Math.floor(this.position)]||0);this.position+=this.step;}this.position-=input.length;while(this.samples.length>=320){const chunk=this.samples.splice(0,320);const out=new Int16Array(320);for(let i=0;i<out.length;i++)out[i]=Math.max(-1,Math.min(1,chunk[i]))*0x7fff;this.port.postMessage(out.buffer,[out.buffer]);}return true;} } registerProcessor('pcm-capture',PcmCapture);`;
+    const module = URL.createObjectURL(new Blob([worklet], { type: "application/javascript" }));
+    try {
+      await context.audioWorklet.addModule(module);
+      const node = new AudioWorkletNode(context, "pcm-capture");
+      node.port.onmessage = (event) => {
+        const socket = socketRef.current;
+        if (socket?.readyState === WebSocket.OPEN) socket.send(event.data);
+      };
+      source.connect(node);
+      node.connect(context.destination);
+      streamRef.current = stream;
+      captureContextRef.current = context;
+      captureNodeRef.current = node;
+    } finally {
+      URL.revokeObjectURL(module);
+    }
+  }, []);
 
-  async function startListening() {
-    if (startingRef.current || vadRef.current) return;
+  const startListening = useCallback(async () => {
+    if (startingRef.current) return;
     startingRef.current = true;
     setIsStarting(true);
-    setStartupProgress(8);
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setError(
-        "This browser does not support microphone access. Use a current browser over HTTPS or localhost.",
-      );
-      setStatus("error");
-      startingRef.current = false;
-      setIsStarting(false);
-      setStartupProgress(0);
-      return;
-    }
-    let stream: MediaStream | null = null;
-    let vad: MicVAD | null = null;
+    setStartupProgress(20);
     try {
-      debug("microphone_request");
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          autoGainControl: true,
-          noiseSuppression: true,
-        },
-      });
-      setError("");
-      setStartupProgress(35);
-      debug("microphone_granted");
-      let activeStream = stream;
-      let pauseStream = false;
-      if (!window.vad)
-        throw new Error(
-          "Voice activity detection assets did not load. Restart the Vite server.",
-        );
-      setStartupProgress(50);
-      vad = await window.vad.MicVAD.new({
-        model: "v5",
-        baseAssetPath: "/vad/",
-        onnxWASMBasePath: "/vad/ort/",
-        positiveSpeechThreshold: 0.6,
-        negativeSpeechThreshold: 0.35,
-        redemptionMs: 850,
-        preSpeechPadMs: 300,
-        minSpeechMs: 350,
-        submitUserSpeechOnPause: false,
-        getStream: async () => activeStream,
-        pauseStream: async (currentStream) => {
-          pauseStream = true;
-          currentStream.getTracks().forEach((track) => track.stop());
-        },
-        resumeStream: async () => {
-          if (!pauseStream) return activeStream;
-          activeStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              channelCount: 1,
-              echoCancellation: true,
-              autoGainControl: true,
-              noiseSuppression: true,
-            },
-          });
-          pauseStream = false;
-          return activeStream;
-        },
-        onSpeechStart: () => debug("vad_speech_start"),
-        onSpeechEnd: (samples) => {
-          const recording = wavFromSamples(samples);
-          debug(
-            "vad_speech_end",
-            `samples=${samples.length} bytes=${recording.size}`,
-          );
-          void sendAudioRef.current?.(recording);
-        },
-        onVADMisfire: () => debug("vad_misfire"),
-        onFrameProcessed: ({ isSpeech }) => {
-          const now = Date.now();
-          if (now - lastLevelUpdateRef.current > 120) {
-            setAudioLevel(isSpeech);
-            lastLevelUpdateRef.current = now;
-          }
-        },
-      });
-      setStartupProgress(80);
-      vadRef.current = vad;
-      await vad.start();
-      setStartupProgress(100);
+      if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) throw new Error("This browser does not support microphone streaming.");
+      await connectSocket();
+      setStartupProgress(65);
+      await startMicrophone();
       setAutoListen(true);
       setStatus("listening");
-      debug("microphone_ready");
+      setError("");
+      setStartupProgress(100);
     } catch (caught) {
-      const details =
-        caught instanceof DOMException
-          ? `${caught.name}: ${caught.message}`
-          : String(caught);
-      debug("microphone_or_vad_failed", details);
-      stream?.getTracks().forEach((track) => track.stop());
-      if (vad) await vad.destroy().catch(() => undefined);
-      vadRef.current = null;
-      const isPermissionError =
-        caught instanceof DOMException &&
-        ["NotAllowedError", "SecurityError"].includes(caught.name);
-      setError(
-        isPermissionError
-          ? `Microphone permission failed (${details}). Allow this site to use the microphone, then try again.`
-          : `Voice detection could not start: ${details}`,
-      );
+      const message = caught instanceof Error ? caught.message : "Microphone could not start.";
+      stopMicrophone();
+      setError(message);
       setStatus("error");
       setStartupProgress(0);
     } finally {
       startingRef.current = false;
       setIsStarting(false);
     }
-  }
+  }, [connectSocket, startMicrophone, stopMicrophone]);
 
-  function stopListening() {
-    debug("session_stopped");
+  const stopListening = useCallback(() => {
     setAutoListen(false);
-    void vadRef.current?.destroy();
-    vadRef.current = null;
-    setStatus((current) => (current === "listening" ? "idle" : current));
-  }
+    autoListenRef.current = false;
+    stopMicrophone();
+    intentionalCloseRef.current = true;
+    socketRef.current?.close();
+    setStatus("idle");
+  }, [stopMicrophone]);
+
+  useEffect(() => () => stopListening(), [stopListening]);
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "configure", voice, language: languagePreference }));
+  }, [languagePreference, voice]);
+
+  const sendText = useCallback(async (text: string) => {
+    const normalized = text.trim();
+    if (!normalized || status === "thinking" || status === "speaking") return;
+    try {
+      await connectSocket();
+      stopMicrophone();
+      addMessage({ id: crypto.randomUUID(), role: "user", text: normalized, createdAt: new Date().toISOString(), language: languagePreference === "auto" ? undefined : languagePreference });
+      socketRef.current?.send(JSON.stringify({ type: "text", text: normalized }));
+      setDraft("");
+      setError("");
+      setStatus("thinking");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Voice connection failed.");
+      setStatus("error");
+    }
+  }, [addMessage, connectSocket, languagePreference, status, stopMicrophone]);
 
   const clearConversation = () => {
     setMessages([initialMessage]);
     setError("");
+    if (socketRef.current?.readyState === WebSocket.OPEN)
+      socketRef.current.send(JSON.stringify({ type: "reset" }));
   };
   const isActive = status === "listening" || status === "speaking";
 
