@@ -326,6 +326,13 @@ button:disabled {
 .session-button-stop:hover {
   background: #701a35;
 }
+.mobile-settings-button,
+.mobile-session-button,
+.voice-settings-drawer-header,
+.voice-settings-backdrop,
+.mobile-tabs {
+  display: none;
+}
 @keyframes wave {
   from {
     height: 5px;
@@ -346,16 +353,181 @@ button:disabled {
   }
 }
 @media (max-width: 1023px) {
+  .voicechat-shell {
+    padding-top: max(1rem, env(safe-area-inset-top));
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+  .live-panel {
+    order: -1;
+    min-height: min(500px, calc(100dvh - 2rem));
+  }
+  .conversation-panel {
+    height: min(640px, calc(100dvh - 2rem));
+    min-height: 420px;
+  }
   .orbital {
     width: 150px;
     height: 150px;
   }
 }
 @media (max-width: 640px) {
+  .voicechat-shell {
+    min-height: 100dvh;
+    padding-right: max(1rem, env(safe-area-inset-right));
+    padding-left: max(1rem, env(safe-area-inset-left));
+  }
   .live-panel {
-    min-height: 410px;
+    min-height: min(480px, calc(100dvh - 2rem));
+    padding: 1.25rem;
+    overflow: visible;
+  }
+  .mobile-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    margin-top: 1rem;
+    padding: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(9, 12, 18, 0.48);
+  }
+  .mobile-tabs button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    min-height: 40px;
+    border: 0;
+    background: transparent;
+    color: #94a3b8;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .mobile-tabs button.mobile-tab-active {
+    background: #164e4a;
+    color: #d8fff6;
+  }
+  .voicechat-content {
+    display: block;
+    padding-top: 1rem;
+  }
+  .mobile-tab-panel {
+    display: none !important;
+  }
+  .mobile-tab-panel.mobile-tab-visible {
+    display: flex !important;
+  }
+  .conversation-panel {
+    height: min(640px, calc(100dvh - 10rem));
+    min-height: 390px;
+  }
+  .mobile-settings-button {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: 1px solid rgba(94, 234, 212, 0.3);
+    background: rgba(16, 24, 34, 0.92);
+    color: #b7f5e7;
+  }
+  .mobile-session-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: min(100%, 280px);
+    min-height: 48px;
+    margin-top: 1.75rem;
+    border: 1px solid #5eead4;
+    background: #b7f5e7;
+    color: #123734;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+  .voice-controls {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 30;
+    display: grid;
+    gap: 1rem;
+    max-height: min(78dvh, 600px);
+    overflow-y: auto;
+    margin: 0;
+    padding: 1.25rem max(1rem, env(safe-area-inset-right))
+      max(1.25rem, env(safe-area-inset-bottom))
+      max(1rem, env(safe-area-inset-left));
+    border: 1px solid rgba(94, 234, 212, 0.3);
+    background: #17212a;
+    box-shadow: 0 -20px 50px rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(105%);
+    transition:
+      opacity 0.2s ease,
+      transform 0.2s ease;
+  }
+  .voice-controls-open {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+  .voice-settings-drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #f8fafc;
+    font-size: 0.875rem;
+    font-weight: 600;
+  }
+  .voice-settings-drawer-header button {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border: 0;
+    background: transparent;
+    color: #cbd5e1;
+  }
+  .desktop-session-button {
+    display: none;
+  }
+  .voice-settings-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: block;
+    border: 0;
+    background: rgba(0, 0, 0, 0.55);
+  }
+  .live-panel {
+    min-height: min(480px, calc(100dvh - 2rem));
   }
   .message {
     font-size: 0.875rem;
+  }
+}
+@media (max-width: 640px) and (orientation: landscape) {
+  .live-panel {
+    min-height: 360px;
+  }
+  .live-panel > .relative.flex-1 {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+  .mobile-session-button {
+    margin-top: 1rem;
+  }
+  .orbital {
+    width: 118px;
+    height: 118px;
+  }
+  .orbital-inner {
+    width: 58px;
+    height: 58px;
   }
 }

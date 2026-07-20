@@ -3,10 +3,12 @@ import {
   AudioLines,
   Bot,
   LoaderCircle,
+  MessageSquare,
   Mic,
   Send,
   Sparkles,
   Square,
+  SlidersHorizontal,
   Volume2,
   VolumeX,
   X,
@@ -33,6 +35,7 @@ const VOICE_OPTIONS = [
   "cedar",
 ] as const;
 type LanguagePreference = "auto" | "zh" | "en";
+type MobileTab = "voice" | "chat";
 declare global {
   interface Window {
     vad?: { MicVAD: typeof MicVAD };
@@ -170,6 +173,8 @@ export default function App() {
   const [languagePreference, setLanguagePreference] =
     useState<LanguagePreference>(getStoredLanguage);
   const [autoListen, setAutoListen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mobileTab, setMobileTab] = useState<MobileTab>("voice");
   const [isStarting, setIsStarting] = useState(false);
   const [startupProgress, setStartupProgress] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
@@ -208,6 +213,14 @@ export default function App() {
     autoListenRef.current = autoListen;
   }, [autoListen]);
   useEffect(() => () => stopListening(), []);
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [settingsOpen]);
 
   const addMessage = useCallback(
     (message: ChatMessage) => setMessages((current) => [...current, message]),
@@ -547,9 +560,9 @@ export default function App() {
   const isActive = status === "listening" || status === "speaking";
 
   return (
-    <main className="min-h-screen overflow-hidden bg-[#10131b] text-slate-100 selection:bg-teal-200 selection:text-slate-950">
+    <main className="voice-app min-h-screen overflow-x-hidden bg-[#10131b] text-slate-100 selection:bg-teal-200 selection:text-slate-950">
       <div className="grid-noise" />
-      <div className="relative mx-auto flex min-h-screen max-w-[1440px] flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
+      <div className="voicechat-shell relative mx-auto flex min-h-screen max-w-[1440px] flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
         <header className="flex items-center justify-between border-b border-white/10 pb-4 sm:pb-5">
           <div className="flex items-center gap-3">
             <div className="brand-mark">
@@ -569,8 +582,39 @@ export default function App() {
             <span className="status-dot status-dot-active" />
           </div>
         </header>
-        <section className="grid flex-1 gap-5 py-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-stretch lg:py-6">
-          <div className="conversation-panel flex h-[min(680px,calc(100dvh-7rem))] min-h-0 flex-col overflow-hidden lg:h-[min(720px,calc(100dvh-9rem))]">
+        <div
+          className="mobile-tabs"
+          role="tablist"
+          aria-label="Voicechat views"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mobileTab === "voice"}
+            aria-controls="voice-panel"
+            className={mobileTab === "voice" ? "mobile-tab-active" : ""}
+            onClick={() => setMobileTab("voice")}
+          >
+            <AudioLines size={17} /> Voice
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mobileTab === "chat"}
+            aria-controls="chat-panel"
+            className={mobileTab === "chat" ? "mobile-tab-active" : ""}
+            onClick={() => setMobileTab("chat")}
+          >
+            <MessageSquare size={17} /> Chat
+          </button>
+        </div>
+        <section className="voicechat-content grid flex-1 gap-5 py-5 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-stretch lg:py-6">
+          <div
+            id="chat-panel"
+            role="tabpanel"
+            aria-label="Chat"
+            className={`conversation-panel mobile-tab-panel flex h-[min(680px,calc(100dvh-7rem))] min-h-0 flex-col overflow-hidden lg:h-[min(720px,calc(100dvh-9rem))] ${mobileTab === "chat" ? "mobile-tab-visible" : ""}`}
+          >
             <div className="flex items-center justify-between border-b border-white/10 px-5 py-4 sm:px-6">
               <div className="flex items-center gap-3">
                 <span
@@ -681,7 +725,12 @@ export default function App() {
               )}
             </div>
           </div>
-          <aside className="live-panel relative flex min-h-[420px] flex-col overflow-hidden p-6 sm:p-7 lg:min-h-[580px]">
+          <aside
+            id="voice-panel"
+            role="tabpanel"
+            aria-label="Voice"
+            className={`live-panel mobile-tab-panel relative flex min-h-[420px] flex-col overflow-hidden p-6 sm:p-7 lg:min-h-[580px] ${mobileTab === "voice" ? "mobile-tab-visible" : ""}`}
+          >
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-teal-100/60">
                 Voice channel
@@ -691,6 +740,16 @@ export default function App() {
                 Online
               </span>
             </div>
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="mobile-settings-button"
+              aria-controls="voice-settings"
+              aria-expanded={settingsOpen}
+              aria-label="Open voice settings"
+              title="Voice settings"
+            >
+              <SlidersHorizontal size={18} />
+            </button>
             <div className="relative flex flex-1 flex-col items-center justify-center py-8">
               <div className={`orbital ${isActive ? "orbital-active" : ""}`}>
                 <div className="orbital-inner">
@@ -725,8 +784,43 @@ export default function App() {
                   VOICE ACTIVITY {audioLevel.toFixed(2)}
                 </p>
               )}
+              <button
+                disabled={isStarting}
+                onClick={() =>
+                  autoListen ? stopListening() : void startListening()
+                }
+                className={`mobile-session-button ${autoListen ? "session-button-stop" : ""}`}
+              >
+                {isStarting ? (
+                  <>
+                    <LoaderCircle size={17} className="animate-spin" />{" "}
+                    Starting... {startupProgress}%
+                  </>
+                ) : autoListen ? (
+                  <>
+                    <Square size={16} fill="currentColor" /> End session
+                  </>
+                ) : (
+                  <>
+                    <Mic size={17} /> Start session
+                  </>
+                )}
+              </button>
             </div>
-            <div className="space-y-4 border-t border-white/10 pt-5">
+            <div
+              id="voice-settings"
+              className={`voice-controls space-y-4 border-t border-white/10 pt-5 ${settingsOpen ? "voice-controls-open" : ""}`}
+              aria-label="Voice settings"
+            >
+              <div className="voice-settings-drawer-header">
+                <span>Voice settings</span>
+                <button
+                  onClick={() => setSettingsOpen(false)}
+                  aria-label="Close voice settings"
+                >
+                  <X size={18} />
+                </button>
+              </div>
               <div className="flex items-center justify-between text-xs text-slate-400">
                 <span>Spoken replies</span>
                 <button
@@ -792,7 +886,7 @@ export default function App() {
                 onClick={() =>
                   autoListen ? stopListening() : void startListening()
                 }
-                className={`session-button ${autoListen ? "session-button-stop" : ""}`}
+                className={`session-button desktop-session-button ${autoListen ? "session-button-stop" : ""}`}
               >
                 {isStarting ? (
                   <>
@@ -811,6 +905,13 @@ export default function App() {
               </button>
             </div>
           </aside>
+          {settingsOpen && (
+            <button
+              className="voice-settings-backdrop"
+              onClick={() => setSettingsOpen(false)}
+              aria-label="Close voice settings"
+            />
+          )}
         </section>
         <footer className="pt-1 text-center text-[11px] text-slate-600 sm:text-left">
           Your conversation is kept in this browser.
