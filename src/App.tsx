@@ -217,13 +217,27 @@ export default function App() {
       resolveReadyRef.current = resolve;
       rejectReadyRef.current = reject;
     });
-    socket.onopen = () => socket.send(JSON.stringify({ type: "session", voice, language: languagePreference, history: historyRef.current }));
+    socket.onopen = () =>
+      socket.send(
+        JSON.stringify({
+          type: "session",
+          voice,
+          language: languagePreference,
+          history: historyRef.current,
+        }),
+      );
     socket.onmessage = (event) => {
       if (typeof event.data !== "string") {
         void queuePcmAudio(event.data as ArrayBuffer);
         return;
       }
-      const message = JSON.parse(event.data) as { type: string; text?: string; assistantText?: string; language?: string; error?: string };
+      const message = JSON.parse(event.data) as {
+        type: string;
+        text?: string;
+        assistantText?: string;
+        language?: string;
+        error?: string;
+      };
       if (message.type === "ready") {
         resolveReadyRef.current?.();
         resolveReadyRef.current = null;
@@ -240,11 +254,23 @@ export default function App() {
         return;
       }
       if (message.type === "transcript" && message.text) {
-        addMessage({ id: crypto.randomUUID(), role: "user", text: message.text, createdAt: new Date().toISOString(), language: message.language });
+        addMessage({
+          id: crypto.randomUUID(),
+          role: "user",
+          text: message.text,
+          createdAt: new Date().toISOString(),
+          language: message.language,
+        });
         return;
       }
       if (message.type === "complete" && message.assistantText) {
-        addMessage({ id: crypto.randomUUID(), role: "assistant", text: message.assistantText, createdAt: new Date().toISOString(), language: message.language });
+        addMessage({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          text: message.assistantText,
+          createdAt: new Date().toISOString(),
+          language: message.language,
+        });
         void waitForQueuedAudio().then(() => {
           if (autoListenRef.current) void startMicrophone();
           setStatus(autoListenRef.current ? "listening" : "idle");
@@ -256,7 +282,8 @@ export default function App() {
         setStatus("error");
       }
     };
-    socket.onerror = () => rejectReadyRef.current?.(new Error("WebSocket connection failed."));
+    socket.onerror = () =>
+      rejectReadyRef.current?.(new Error("WebSocket connection failed."));
     socket.onclose = () => {
       socketRef.current = null;
       socketReadyRef.current = null;
@@ -271,15 +298,36 @@ export default function App() {
       intentionalCloseRef.current = false;
     };
     return socketReadyRef.current;
-  }, [addMessage, languagePreference, queuePcmAudio, stopMicrophone, voice, waitForQueuedAudio]);
+  }, [
+    addMessage,
+    languagePreference,
+    queuePcmAudio,
+    stopMicrophone,
+    voice,
+    waitForQueuedAudio,
+  ]);
 
   const startMicrophone = useCallback(async () => {
-    if (streamRef.current || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true } });
+    if (
+      streamRef.current ||
+      !socketRef.current ||
+      socketRef.current.readyState !== WebSocket.OPEN
+    )
+      return;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        autoGainControl: true,
+        noiseSuppression: true,
+      },
+    });
     const context = new AudioContext();
     const source = context.createMediaStreamSource(stream);
     const worklet = `class PcmCapture extends AudioWorkletProcessor { constructor(){super();this.samples=[];this.position=0;this.step=sampleRate/16000;} process(inputs){const input=inputs[0][0];if(!input)return true;while(this.position<input.length){this.samples.push(input[Math.floor(this.position)]||0);this.position+=this.step;}this.position-=input.length;while(this.samples.length>=320){const chunk=this.samples.splice(0,320);const out=new Int16Array(320);for(let i=0;i<out.length;i++)out[i]=Math.max(-1,Math.min(1,chunk[i]))*0x7fff;this.port.postMessage(out.buffer,[out.buffer]);}return true;} } registerProcessor('pcm-capture',PcmCapture);`;
-    const module = URL.createObjectURL(new Blob([worklet], { type: "application/javascript" }));
+    const module = URL.createObjectURL(
+      new Blob([worklet], { type: "application/javascript" }),
+    );
     try {
       await context.audioWorklet.addModule(module);
       const node = new AudioWorkletNode(context, "pcm-capture");
@@ -303,7 +351,8 @@ export default function App() {
     setIsStarting(true);
     setStartupProgress(20);
     try {
-      if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) throw new Error("This browser does not support microphone streaming.");
+      if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode)
+        throw new Error("This browser does not support microphone streaming.");
       await connectSocket();
       setStartupProgress(65);
       await startMicrophone();
@@ -312,7 +361,10 @@ export default function App() {
       setError("");
       setStartupProgress(100);
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "Microphone could not start.";
+      const message =
+        caught instanceof Error
+          ? caught.message
+          : "Microphone could not start.";
       stopMicrophone();
       setError(message);
       setStatus("error");
@@ -335,25 +387,46 @@ export default function App() {
   useEffect(() => () => stopListening(), [stopListening]);
   useEffect(() => {
     const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "configure", voice, language: languagePreference }));
+    if (socket?.readyState === WebSocket.OPEN)
+      socket.send(
+        JSON.stringify({
+          type: "configure",
+          voice,
+          language: languagePreference,
+        }),
+      );
   }, [languagePreference, voice]);
 
-  const sendText = useCallback(async (text: string) => {
-    const normalized = text.trim();
-    if (!normalized || status === "thinking" || status === "speaking") return;
-    try {
-      await connectSocket();
-      stopMicrophone();
-      addMessage({ id: crypto.randomUUID(), role: "user", text: normalized, createdAt: new Date().toISOString(), language: languagePreference === "auto" ? undefined : languagePreference });
-      socketRef.current?.send(JSON.stringify({ type: "text", text: normalized }));
-      setDraft("");
-      setError("");
-      setStatus("thinking");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Voice connection failed.");
-      setStatus("error");
-    }
-  }, [addMessage, connectSocket, languagePreference, status, stopMicrophone]);
+  const sendText = useCallback(
+    async (text: string) => {
+      const normalized = text.trim();
+      if (!normalized || status === "thinking" || status === "speaking") return;
+      try {
+        await connectSocket();
+        stopMicrophone();
+        addMessage({
+          id: crypto.randomUUID(),
+          role: "user",
+          text: normalized,
+          createdAt: new Date().toISOString(),
+          language:
+            languagePreference === "auto" ? undefined : languagePreference,
+        });
+        socketRef.current?.send(
+          JSON.stringify({ type: "text", text: normalized }),
+        );
+        setDraft("");
+        setError("");
+        setStatus("thinking");
+      } catch (caught) {
+        setError(
+          caught instanceof Error ? caught.message : "Voice connection failed.",
+        );
+        setStatus("error");
+      }
+    },
+    [addMessage, connectSocket, languagePreference, status, stopMicrophone],
+  );
 
   const clearConversation = () => {
     setMessages([initialMessage]);
