@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeHistory, streamAudioReply } from './chat-service.js';
+import { normalizeHistory, streamAudioInputReply, streamAudioReply } from './chat-service.js';
 
 test('normalizeHistory keeps only chat roles and bounds message text', () => {
   const output = normalizeHistory([
@@ -64,4 +64,31 @@ test('streamAudioReply forwards PCM chunks without assembling a WAV when streami
   assert.deepEqual(sentChunks, ['AQI=']);
   assert.equal(result.assistantText, 'Hello');
   assert.equal('audio' in result, false);
+});
+
+test('streamAudioInputReply sends a WAV turn directly to the audio model', async () => {
+  const requests = [];
+  const client = {
+    chat: { completions: { create: async (request) => {
+      requests.push(request);
+      return (async function* () {
+        yield { choices: [{ delta: { audio: { transcript: 'Done', data: 'AQI=' } } }] };
+      }());
+    } } },
+  };
+  const audio = Buffer.from('RIFFtest');
+
+  const result = await streamAudioInputReply(client, {
+    audioModel: 'gpt-audio-mini', audioVoice: 'alloy', audio, history: [{ role: 'user', text: 'Earlier' }],
+  });
+
+  assert.equal(result.assistantText, 'Done');
+  assert.deepEqual(requests[0].messages.at(-1), {
+    role: 'user',
+    content: [{
+      type: 'input_audio',
+      input_audio: { data: audio.toString('base64'), format: 'wav' },
+    }],
+  });
+  assert.deepEqual(requests[0].messages[1], { role: 'user', content: 'Earlier' });
 });

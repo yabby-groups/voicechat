@@ -119,6 +119,7 @@ export default function App() {
   const socketReadyRef = useRef<Promise<void> | null>(null);
   const resolveReadyRef = useRef<(() => void) | null>(null);
   const rejectReadyRef = useRef<((error: Error) => void) | null>(null);
+  const assistantMessageIdsByTurnRef = useRef(new Map<number, string>());
   const intentionalCloseRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
   const captureContextRef = useRef<AudioContext | null>(null);
@@ -155,10 +156,15 @@ export default function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [settingsOpen]);
 
-  const addMessage = useCallback(
-    (message: ChatMessage) => setMessages((current) => [...current, message]),
-    [],
-  );
+  const addMessage = useCallback((message: ChatMessage, beforeMessageId?: string) => {
+    setMessages((current) => {
+      const beforeIndex = beforeMessageId
+        ? current.findIndex((item) => item.id === beforeMessageId)
+        : -1;
+      if (beforeIndex < 0) return [...current, message];
+      return [...current.slice(0, beforeIndex), message, ...current.slice(beforeIndex)];
+    });
+  }, []);
 
   const stopMicrophone = useCallback(() => {
     captureNodeRef.current?.disconnect();
@@ -209,6 +215,7 @@ export default function App() {
 
   const connectSocket = useCallback(async () => {
     if (socketReadyRef.current) return socketReadyRef.current;
+    assistantMessageIdsByTurnRef.current.clear();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${location.host}/api/chat/ws`);
     socket.binaryType = "arraybuffer";
@@ -237,6 +244,7 @@ export default function App() {
         assistantText?: string;
         language?: string;
         error?: string;
+        turnId?: number;
       };
       if (message.type === "ready") {
         resolveReadyRef.current?.();
@@ -254,23 +262,30 @@ export default function App() {
         return;
       }
       if (message.type === "transcript" && message.text) {
+        const messageId = crypto.randomUUID();
         addMessage({
-          id: crypto.randomUUID(),
+          id: messageId,
           role: "user",
           text: message.text,
           createdAt: new Date().toISOString(),
           language: message.language,
-        });
+        }, message.turnId === undefined
+          ? undefined
+          : assistantMessageIdsByTurnRef.current.get(message.turnId));
         return;
       }
       if (message.type === "complete" && message.assistantText) {
+        const messageId = crypto.randomUUID();
         addMessage({
-          id: crypto.randomUUID(),
+          id: messageId,
           role: "assistant",
           text: message.assistantText,
           createdAt: new Date().toISOString(),
           language: message.language,
         });
+        if (message.turnId !== undefined) {
+          assistantMessageIdsByTurnRef.current.set(message.turnId, messageId);
+        }
         void waitForQueuedAudio().then(() => {
           if (autoListenRef.current) void startMicrophone();
           setStatus(autoListenRef.current ? "listening" : "idle");

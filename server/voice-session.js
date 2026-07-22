@@ -1,4 +1,6 @@
-import { normalizeHistory, createOpenAIClient, streamAudioReply, transcribeAudio } from './chat-service.js';
+import {
+  normalizeHistory, createOpenAIClient, streamAudioInputReply, streamAudioReply, transcribeAudio,
+} from './chat-service.js';
 import { pcm16ToFloat32, SileroVad, VadTurnDetector, wavFromFrames } from './vad.js';
 
 const BUILT_IN_VOICES = new Set(['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse', 'marin', 'cedar']);
@@ -20,15 +22,19 @@ function historyFrom(value) {
 }
 
 export class VoiceSession {
-  constructor(socket, config, log = () => undefined) {
+  constructor(socket, config, log = () => undefined, services = {
+    createOpenAIClient, streamAudioInputReply, streamAudioReply, transcribeAudio,
+  }) {
     this.socket = socket;
     this.config = config;
     this.log = log;
+    this.services = services;
     this.history = [];
     this.preferences = { voice: config.audioVoice, language: undefined };
     this.ready = false;
     this.busy = false;
     this.audioQueue = Promise.resolve();
+    this.nextTurnId = 0;
   }
 
   send(event) {
@@ -93,23 +99,62 @@ export class VoiceSession {
 
   async replyToAudio(frames) {
     this.busy = true;
-    this.send({ type: 'turn_started', source: 'audio' });
+    const turnId = ++this.nextTurnId;
+    this.send({ type: 'turn_started', source: 'audio', turnId });
     try {
+      const audio = wavFromFrames(frames);
+      const userEntry = { role: 'user', text: '' };
+      this.history.push(userEntry);
       this.log('transcription_start');
-      const transcript = await transcribeAudio({
-        apiKey: process.env.OPENAI_API_KEY,
+      void this.transcribeAudioTurn(audio, userEntry, turnId);
+      const client = this.services.createOpenAIClient(
+        process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs,
+      );
+      if (this.config.audioResponseMode === 'two_stage') throw new Error('WebSocket audio requires OPENAI_AUDIO_RESPONSE_MODE=direct.');
+      this.log('response_start');
+      const result = await this.services.streamAudioInputReply(client, {
         ...this.config,
-        buffer: wavFromFrames(frames),
-        mimetype: 'audio/wav',
-        filename: 'voice-turn.wav',
+        audioVoice: this.preferences.voice,
+        audio,
+        history: this.history.slice(0, -1),
+        language: this.preferences.language,
+        includeAudio: false,
+        onAudioChunk: (data) => this.sendAudio(data),
       });
-      if (!transcript.text) throw new Error('No speech was detected. Please try again.');
-      this.history.push({ role: 'user', text: transcript.text });
-      this.send({ type: 'transcript', text: transcript.text, language: transcript.language });
-      await this.reply(transcript.text, this.preferences.language || transcript.language, true);
+      this.history.push({ role: 'assistant', text: result.assistantText });
+      this.send({
+        type: 'complete', assistantText: result.assistantText, language: this.preferences.language, turnId,
+      });
+      this.log('complete', `reply_chars=${result.assistantText.length}`);
     } finally {
       this.busy = false;
     }
+  }
+
+  async transcribeAudioTurn(audio, userEntry, turnId) {
+    try {
+      const transcript = await this.services.transcribeAudio({
+        apiKey: process.env.OPENAI_API_KEY,
+        ...this.config,
+        buffer: audio,
+        mimetype: 'audio/wav',
+        filename: 'voice-turn.wav',
+      });
+      if (!transcript.text || !this.history.includes(userEntry)) {
+        this.removeHistoryEntry(userEntry);
+        return;
+      }
+      userEntry.text = transcript.text;
+      this.send({ type: 'transcript', text: transcript.text, language: transcript.language, turnId });
+    } catch (error) {
+      this.removeHistoryEntry(userEntry);
+      this.log('transcription_error', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  removeHistoryEntry(entry) {
+    const index = this.history.indexOf(entry);
+    if (index >= 0) this.history.splice(index, 1);
   }
 
   async reply(text, language, alreadyBusy = false) {
@@ -118,10 +163,10 @@ export class VoiceSession {
       this.send({ type: 'turn_started', source: 'text' });
     }
     try {
-      const client = createOpenAIClient(process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs);
+      const client = this.services.createOpenAIClient(process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs);
       if (this.config.audioResponseMode === 'two_stage') throw new Error('WebSocket audio requires OPENAI_AUDIO_RESPONSE_MODE=direct.');
       this.log('response_start');
-      const result = await streamAudioReply(client, {
+      const result = await this.services.streamAudioReply(client, {
         ...this.config,
         audioVoice: this.preferences.voice,
         text,

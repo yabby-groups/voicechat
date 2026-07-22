@@ -72,7 +72,7 @@ async function synthesizeSpeech(client, text, language, audioModel, voice) {
 }
 
 export async function streamAudioReply(client, {
-  audioModel, audioVoice, text, history = [], language, onAudioChunk, includeAudio = true,
+  audioModel, audioVoice, text, history = [], language, onAudioChunk, includeAudio = true, userContent,
 }) {
   const stream = await client.chat.completions.create({
     model: audioModel,
@@ -86,7 +86,7 @@ export async function streamAudioReply(client, {
           `You are Echo, a thoughtful voice companion. ${languageInstruction(language)} Keep spoken answers concise, natural, and useful. Do not use markdown.`,
       },
       ...normalizeHistory(history),
-      { role: 'user', content: text },
+      { role: 'user', content: userContent || text },
     ],
   });
   const audioChunks = [];
@@ -110,6 +110,24 @@ export async function streamAudioReply(client, {
     assistantText,
     ...(includeAudio ? { audio: pcm16ToWavBase64(audioChunks), mimeType: 'audio/wav' } : {}),
   };
+}
+
+export async function streamAudioInputReply(client, {
+  audioModel, audioVoice, audio, history = [], language, onAudioChunk, includeAudio = true,
+}) {
+  if (!Buffer.isBuffer(audio) || audio.length === 0) throw new Error('Audio input must be a non-empty WAV buffer.');
+  return streamAudioReply(client, {
+    audioModel,
+    audioVoice,
+    history,
+    language,
+    onAudioChunk,
+    includeAudio,
+    userContent: [{
+      type: 'input_audio',
+      input_audio: { data: audio.toString('base64'), format: 'wav' },
+    }],
+  });
 }
 
 export async function respondToMessage({ apiKey, baseURL, requestTimeoutMs, chatModel, audioModel, audioVoice, audioResponseMode = 'direct', text, history = [], language }) {
