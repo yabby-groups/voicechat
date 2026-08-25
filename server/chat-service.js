@@ -47,11 +47,13 @@ function languageInstruction(language) {
   return 'Reply in the same language as the user.';
 }
 
-async function synthesizeSpeech(client, text, language, audioModel, voice) {
+export async function synthesizeSpeech(client, {
+  text, language, audioModel, audioVoice, onAudioChunk, includeAudio = true,
+}) {
   const stream = await client.chat.completions.create({
     model: audioModel,
     modalities: ['text', 'audio'],
-    audio: { voice, format: 'pcm16' },
+    audio: { voice: audioVoice, format: 'pcm16' },
     stream: true,
     messages: [{
       role: 'user',
@@ -63,16 +65,21 @@ async function synthesizeSpeech(client, text, language, audioModel, voice) {
     }],
   });
   const audioChunks = [];
+  let audioChunkCount = 0;
   for await (const chunk of stream) {
     const data = chunk.choices[0]?.delta?.audio?.data;
-    if (data) audioChunks.push(Buffer.from(data, 'base64'));
+    if (data) {
+      audioChunkCount += 1;
+      if (includeAudio) audioChunks.push(Buffer.from(data, 'base64'));
+      onAudioChunk?.(data);
+    }
   }
-  if (!audioChunks.length) throw new Error('The audio model did not return playable speech data.');
-  return { audio: pcm16ToWavBase64(audioChunks), mimeType: 'audio/wav' };
+  if (!audioChunkCount) throw new Error('The audio model did not return playable speech data.');
+  return includeAudio ? { audio: pcm16ToWavBase64(audioChunks), mimeType: 'audio/wav' } : {};
 }
 
 export async function streamAudioReply(client, {
-  audioModel, audioVoice, text, history = [], language, onAudioChunk, includeAudio = true, userContent,
+  audioModel, audioVoice, text, history = [], language, onAudioChunk, includeAudio = true, userContent, systemInstruction,
 }) {
   const stream = await client.chat.completions.create({
     model: audioModel,
@@ -82,7 +89,7 @@ export async function streamAudioReply(client, {
     messages: [
       {
         role: 'system',
-        content:
+        content: systemInstruction ||
           `You are Echo, a thoughtful voice companion. ${languageInstruction(language)} Keep spoken answers concise, natural, and useful. Do not use markdown.`,
       },
       ...normalizeHistory(history),
@@ -113,7 +120,7 @@ export async function streamAudioReply(client, {
 }
 
 export async function streamAudioInputReply(client, {
-  audioModel, audioVoice, audio, history = [], language, onAudioChunk, includeAudio = true,
+  audioModel, audioVoice, audio, history = [], language, onAudioChunk, includeAudio = true, systemInstruction,
 }) {
   if (!Buffer.isBuffer(audio) || audio.length === 0) throw new Error('Audio input must be a non-empty WAV buffer.');
   return streamAudioReply(client, {
@@ -123,6 +130,7 @@ export async function streamAudioInputReply(client, {
     language,
     onAudioChunk,
     includeAudio,
+    systemInstruction,
     userContent: [{
       type: 'input_audio',
       input_audio: { data: audio.toString('base64'), format: 'wav' },
@@ -130,11 +138,9 @@ export async function streamAudioInputReply(client, {
   });
 }
 
-export async function respondToMessage({ apiKey, baseURL, requestTimeoutMs, chatModel, audioModel, audioVoice, audioResponseMode = 'direct', text, history = [], language }) {
-  const client = createOpenAIClient(apiKey, baseURL, requestTimeoutMs);
-  if (audioResponseMode !== 'two_stage') {
-    return streamAudioReply(client, { audioModel, audioVoice, text, history, language });
-  }
+export async function twoStageReply(client, {
+  chatModel, audioModel, audioVoice, text, history = [], language, onAudioChunk, includeAudio = true,
+}) {
   const response = await client.responses.create({
     model: chatModel,
     input: [
@@ -149,8 +155,18 @@ export async function respondToMessage({ apiKey, baseURL, requestTimeoutMs, chat
   });
   const assistantText = response.output_text.trim();
   if (!assistantText) throw new Error('The assistant returned an empty response.');
-  const speech = await synthesizeSpeech(client, assistantText, language, audioModel, audioVoice);
+  const speech = await synthesizeSpeech(client, {
+    text: assistantText, language, audioModel, audioVoice, onAudioChunk, includeAudio,
+  });
   return { assistantText, ...speech };
+}
+
+export async function respondToMessage({ apiKey, baseURL, requestTimeoutMs, chatModel, audioModel, audioVoice, audioResponseMode = 'direct', text, history = [], language }) {
+  const client = createOpenAIClient(apiKey, baseURL, requestTimeoutMs);
+  if (audioResponseMode !== 'two_stage') {
+    return streamAudioReply(client, { audioModel, audioVoice, text, history, language });
+  }
+  return twoStageReply(client, { chatModel, audioModel, audioVoice, text, history, language });
 }
 
 export async function transcribeAudio({ apiKey, baseURL, requestTimeoutMs, transcribeModel, buffer, mimetype, filename }) {

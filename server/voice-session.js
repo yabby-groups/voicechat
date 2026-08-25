@@ -1,5 +1,5 @@
 import {
-  normalizeHistory, createOpenAIClient, streamAudioInputReply, streamAudioReply, transcribeAudio,
+  normalizeHistory, createOpenAIClient, streamAudioInputReply, streamAudioReply, transcribeAudio, twoStageReply,
 } from './chat-service.js';
 import { pcm16ToFloat32, SileroVad, VadTurnDetector, wavFromFrames } from './vad.js';
 
@@ -23,7 +23,7 @@ function historyFrom(value) {
 
 export class VoiceSession {
   constructor(socket, config, log = () => undefined, services = {
-    createOpenAIClient, streamAudioInputReply, streamAudioReply, transcribeAudio,
+    createOpenAIClient, streamAudioInputReply, streamAudioReply, transcribeAudio, twoStageReply,
   }) {
     this.socket = socket;
     this.config = config;
@@ -105,12 +105,34 @@ export class VoiceSession {
       const audio = wavFromFrames(frames);
       const userEntry = { role: 'user', text: '' };
       this.history.push(userEntry);
+      if (this.config.audioResponseMode === 'two_stage') {
+        this.log('transcription_start');
+        const transcript = await this.transcribeAudioForTwoStage(audio, userEntry, turnId);
+        const client = this.services.createOpenAIClient(
+          process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs,
+        );
+        this.log('response_start');
+        const result = await this.services.twoStageReply(client, {
+          ...this.config,
+          audioVoice: this.preferences.voice,
+          text: transcript.text,
+          history: this.history.slice(0, -1),
+          language: this.preferences.language,
+          includeAudio: false,
+          onAudioChunk: (data) => this.sendAudio(data),
+        });
+        this.history.push({ role: 'assistant', text: result.assistantText });
+        this.send({
+          type: 'complete', assistantText: result.assistantText, language: this.preferences.language, turnId,
+        });
+        this.log('complete', `reply_chars=${result.assistantText.length}`);
+        return;
+      }
       this.log('transcription_start');
       void this.transcribeAudioTurn(audio, userEntry, turnId);
       const client = this.services.createOpenAIClient(
         process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs,
       );
-      if (this.config.audioResponseMode === 'two_stage') throw new Error('WebSocket audio requires OPENAI_AUDIO_RESPONSE_MODE=direct.');
       this.log('response_start');
       const result = await this.services.streamAudioInputReply(client, {
         ...this.config,
@@ -142,13 +164,49 @@ export class VoiceSession {
       });
       if (!transcript.text || !this.history.includes(userEntry)) {
         this.removeHistoryEntry(userEntry);
-        return;
+        return null;
       }
       userEntry.text = transcript.text;
       this.send({ type: 'transcript', text: transcript.text, language: transcript.language, turnId });
+      return transcript;
     } catch (error) {
       this.removeHistoryEntry(userEntry);
       this.log('transcription_error', error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }
+
+  async transcribeAudioForTwoStage(audio, userEntry, turnId) {
+    const transcript = await this.transcribeAudioTurn(audio, userEntry, turnId);
+    if (transcript?.text) return transcript;
+    if (!this.history.includes(userEntry)) this.history.push(userEntry);
+
+    try {
+      this.log('transcription_fallback_start');
+      const client = this.services.createOpenAIClient(
+        process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs,
+      );
+      const fallback = await this.services.streamAudioInputReply(client, {
+        ...this.config,
+        audioVoice: this.preferences.voice,
+        audio,
+        history: [],
+        language: this.preferences.language,
+        includeAudio: false,
+        systemInstruction: 'Transcribe the user audio verbatim. Return only the transcript. Do not answer or add commentary.',
+      });
+      const text = fallback.assistantText?.trim();
+      if (!text) throw new Error('The audio model returned an empty transcript.');
+      userEntry.text = text;
+      const fallbackTranscript = { text, language: this.preferences.language || 'und' };
+      this.send({ type: 'transcript', ...fallbackTranscript, turnId });
+      this.log('transcription_fallback_complete', `chars=${text.length}`);
+      return fallbackTranscript;
+    } catch (error) {
+      this.removeHistoryEntry(userEntry);
+      const message = error instanceof Error ? error.message : String(error);
+      this.log('transcription_fallback_error', message);
+      throw new Error(`Unable to transcribe the audio turn for two_stage mode: ${message}`);
     }
   }
 
@@ -164,9 +222,11 @@ export class VoiceSession {
     }
     try {
       const client = this.services.createOpenAIClient(process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs);
-      if (this.config.audioResponseMode === 'two_stage') throw new Error('WebSocket audio requires OPENAI_AUDIO_RESPONSE_MODE=direct.');
       this.log('response_start');
-      const result = await this.services.streamAudioReply(client, {
+      const service = this.config.audioResponseMode === 'two_stage'
+        ? this.services.twoStageReply
+        : this.services.streamAudioReply;
+      const result = await service(client, {
         ...this.config,
         audioVoice: this.preferences.voice,
         text,

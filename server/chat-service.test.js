@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeHistory, streamAudioInputReply, streamAudioReply } from './chat-service.js';
+import { normalizeHistory, streamAudioInputReply, streamAudioReply, twoStageReply } from './chat-service.js';
 
 test('normalizeHistory keeps only chat roles and bounds message text', () => {
   const output = normalizeHistory([
@@ -91,4 +91,23 @@ test('streamAudioInputReply sends a WAV turn directly to the audio model', async
     }],
   });
   assert.deepEqual(requests[0].messages[1], { role: 'user', content: 'Earlier' });
+});
+
+test('twoStageReply streams synthesized PCM chunks without retaining a WAV', async () => {
+  const sentChunks = [];
+  const client = {
+    responses: { create: async () => ({ output_text: 'A staged answer.' }) },
+    chat: { completions: { create: async () => (async function* () {
+      yield { choices: [{ delta: { audio: { data: 'AQI=' } } }] };
+    }()) } },
+  };
+
+  const result = await twoStageReply(client, {
+    chatModel: 'gpt-5.6-luna', audioModel: 'gpt-audio-mini', audioVoice: 'alloy', text: 'Hi',
+    includeAudio: false, onAudioChunk: (chunk) => sentChunks.push(chunk),
+  });
+
+  assert.equal(result.assistantText, 'A staged answer.');
+  assert.equal('audio' in result, false);
+  assert.deepEqual(sentChunks, ['AQI=']);
 });

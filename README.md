@@ -9,7 +9,7 @@ An OpenAI-backed continuous voice chat interface built with Vite, React, Tailwin
 3. Run `npm install`.
 3. Run `npm run dev` and open `http://localhost:5173`.
 
-Speak naturally after starting a session. The browser sends 16 kHz mono PCM16 microphone frames over one WebSocket connection; the Node service runs Silero v5 VAD and sends a turn after a short pause. It sends that WAV turn directly to one streaming `gpt-audio-mini` request to generate both the reply text and PCM voice response. `gpt-4o-mini-transcribe` runs independently to update the visible transcript and subsequent text context, without delaying the reply. WebSocket audio requires `OPENAI_AUDIO_RESPONSE_MODE=direct`.
+Speak naturally after starting a session. The browser sends 16 kHz mono PCM16 microphone frames over one WebSocket connection; the Node service runs Silero v5 VAD and sends a turn after a short pause. In `direct` mode, it sends that WAV turn to one streaming `gpt-audio-mini` request to generate both the reply text and PCM voice response, while `gpt-4o-mini-transcribe` updates the visible transcript independently. In `two_stage` mode, the service first transcribes the turn, generates a text reply with `OPENAI_CHAT_MODEL`, then streams synthesized PCM speech from `OPENAI_AUDIO_MODEL`.
 
 All chat interaction uses `/api/chat/ws`. Client JSON messages initialize the session, update preferences, or submit text; microphone audio and assistant audio use binary PCM16 WebSocket frames. Server messages report readiness, speech/turn state, transcripts, completion, and errors. Assistant PCM chunks are played with Web Audio after a 120 ms buffer.
 

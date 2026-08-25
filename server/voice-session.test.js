@@ -13,7 +13,7 @@ test('audio reply starts before asynchronous transcription completes', async () 
   const sent = [];
   const calls = [];
   const session = new VoiceSession(
-    { readyState: 1, send: (event) => sent.push(JSON.parse(event)) },
+    { readyState: 1, send: (event) => { if (typeof event === 'string') sent.push(JSON.parse(event)); } },
     { audioVoice: 'alloy', audioResponseMode: 'direct' },
     () => undefined,
     {
@@ -60,4 +60,91 @@ test('a failed asynchronous transcription does not cancel an audio reply', async
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(session.history, [{ role: 'assistant', text: 'Audio reply' }]);
+});
+
+test('two_stage text turns use the staged reply service and stream PCM', async () => {
+  const sent = [];
+  const requests = [];
+  const session = new VoiceSession(
+    { readyState: 1, send: (event) => { if (typeof event === 'string') sent.push(JSON.parse(event)); } },
+    { audioVoice: 'alloy', audioResponseMode: 'two_stage' },
+    () => undefined,
+    {
+      createOpenAIClient: () => ({}),
+      streamAudioReply: async () => { throw new Error('direct service should not run'); },
+      twoStageReply: async (_client, request) => {
+        requests.push(request);
+        request.onAudioChunk('AQI=');
+        return { assistantText: 'Staged reply' };
+      },
+    },
+  );
+
+  await session.receiveText({ text: 'Hello' });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].includeAudio, false);
+  assert.deepEqual(session.history, [
+    { role: 'user', text: 'Hello' }, { role: 'assistant', text: 'Staged reply' },
+  ]);
+  assert.deepEqual(sent.map((event) => event.type), ['turn_started', 'complete']);
+});
+
+test('two_stage audio turns transcribe before using the staged reply service', async () => {
+  const sent = [];
+  const requests = [];
+  const session = new VoiceSession(
+    { readyState: 1, send: (event) => sent.push(JSON.parse(event)) },
+    { audioVoice: 'alloy', audioResponseMode: 'two_stage' },
+    () => undefined,
+    {
+      createOpenAIClient: () => ({}),
+      transcribeAudio: async () => ({ text: 'Spoken request', language: 'en' }),
+      streamAudioInputReply: async () => { throw new Error('direct service should not run'); },
+      twoStageReply: async (_client, request) => {
+        requests.push(request);
+        return { assistantText: 'Staged reply' };
+      },
+    },
+  );
+
+  await session.replyToAudio([new Float32Array([0, 0.5])]);
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].text, 'Spoken request');
+  assert.deepEqual(requests[0].history, []);
+  assert.deepEqual(session.history, [
+    { role: 'user', text: 'Spoken request' }, { role: 'assistant', text: 'Staged reply' },
+  ]);
+  assert.deepEqual(sent.map((event) => event.type), ['turn_started', 'transcript', 'complete']);
+});
+
+test('two_stage audio turns fall back to the current audio model when transcription is unavailable', async () => {
+  const sent = [];
+  const requests = [];
+  const session = new VoiceSession(
+    { readyState: 1, send: (event) => sent.push(JSON.parse(event)) },
+    { audioVoice: 'alloy', audioResponseMode: 'two_stage' },
+    () => undefined,
+    {
+      createOpenAIClient: () => ({}),
+      transcribeAudio: async () => { throw new Error('model unavailable'); },
+      streamAudioInputReply: async (_client, request) => {
+        assert.match(request.systemInstruction, /Transcribe the user audio verbatim/);
+        return { assistantText: 'Fallback transcript' };
+      },
+      twoStageReply: async (_client, request) => {
+        requests.push(request);
+        return { assistantText: 'Staged reply' };
+      },
+    },
+  );
+
+  await session.replyToAudio([new Float32Array([0, 0.5])]);
+
+  assert.equal(requests[0].text, 'Fallback transcript');
+  assert.deepEqual(session.history, [
+    { role: 'user', text: 'Fallback transcript' }, { role: 'assistant', text: 'Staged reply' },
+  ]);
+  assert.deepEqual(sent.map((event) => event.type), ['turn_started', 'transcript', 'complete']);
 });
