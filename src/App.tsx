@@ -9,11 +9,35 @@ import {
   Sparkles,
   Square,
   SlidersHorizontal,
+  LogOut,
   Volume2,
   VolumeX,
   X,
 } from "lucide-react";
 import type { ChatMessage, VoiceStatus } from "./types";
+import LoginScreen from "./LoginScreen";
+import {
+  apiKeyFor,
+  clearAuthToken,
+  createVoicechatToken,
+  getCurrentUser,
+  getStoredAuthToken,
+  getStoredAudioResponseMode,
+  getStoredModel,
+  getStoredTokenId,
+  listMyTokens,
+  listResponseModels,
+  signIn,
+  storeAuthToken,
+  storeAudioResponseMode,
+  storeModel,
+  storeTokenId,
+  supportsResponses,
+  type MynaUser,
+  type AudioResponseMode,
+  type TokenBaseModel,
+  type TokenBaseToken,
+} from "./myna";
 
 const STORAGE_KEY = "echo-voicechat-history-v1";
 const VOICE_STORAGE_KEY = "echo-voicechat-voice-v1";
@@ -108,6 +132,17 @@ export default function App() {
   const [isStarting, setIsStarting] = useState(false);
   const [startupProgress, setStartupProgress] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [authToken, setAuthToken] = useState(getStoredAuthToken);
+  const [user, setUser] = useState<MynaUser | null>(null);
+  const [apiTokens, setApiTokens] = useState<TokenBaseToken[]>([]);
+  const [models, setModels] = useState<TokenBaseModel[]>([]);
+  const [selectedTokenId, setSelectedTokenId] = useState(getStoredTokenId);
+  const [selectedModel, setSelectedModel] = useState(getStoredModel);
+  const [audioResponseMode, setAudioResponseMode] = useState<AudioResponseMode>(
+    () => getStoredAudioResponseMode() || "direct",
+  );
+  const [accountLoading, setAccountLoading] = useState(Boolean(getStoredAuthToken()));
+  const [accountError, setAccountError] = useState("");
   const historyRef = useRef(messages);
   const mutedRef = useRef(muted);
   const startingRef = useRef(false);
@@ -124,6 +159,10 @@ export default function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const captureContextRef = useRef<AudioContext | null>(null);
   const captureNodeRef = useRef<AudioWorkletNode | null>(null);
+  const selectedToken = apiTokens.find((token) => token.id === selectedTokenId) || null;
+  const canStartSession = Boolean(
+    selectedToken && !accountLoading && (audioResponseMode === "direct" || selectedModel),
+  );
 
   useEffect(() => {
     historyRef.current = messages;
@@ -155,6 +194,61 @@ export default function App() {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [settingsOpen]);
+  useEffect(() => {
+    if (!authToken) {
+      setUser(null);
+      setApiTokens([]);
+      setModels([]);
+      setAccountLoading(false);
+      return;
+    }
+    let active = true;
+    const loadAccount = async () => {
+      setAccountLoading(true);
+      setAccountError("");
+      try {
+        const [currentUser, tokenResult, modelResult] = await Promise.all([
+          getCurrentUser(authToken),
+          listMyTokens(authToken),
+          listResponseModels().catch(() => ({ models: [] })),
+        ]);
+        let tokens = (tokenResult.tokens || []).filter((token) => token.status === 1 && token.token_key);
+        if (tokens.length === 0) {
+          const created = await createVoicechatToken(authToken);
+          if (!created.token?.token_key) throw new Error("Token creation completed without a token key.");
+          tokens = [created.token];
+        }
+        const responseModels = (modelResult.models || []).filter(
+          (model) => Number(model.enabled) === 1 && Boolean(model.alias) && supportsResponses(model),
+        );
+        if (!active) return;
+        setUser(currentUser);
+        setApiTokens(tokens);
+        setModels(responseModels);
+        const nextToken = tokens.some((token) => token.id === selectedTokenId) ? selectedTokenId : tokens[0].id;
+        const nextModel = responseModels.some((model) => model.alias === selectedModel)
+          ? selectedModel
+          : responseModels[0]?.alias || "";
+        setSelectedTokenId(nextToken);
+        setSelectedModel(nextModel);
+        storeTokenId(nextToken);
+        storeModel(nextModel);
+      } catch (caught) {
+        if (!active) return;
+        const message = caught instanceof Error ? caught.message : "Unable to load your Myna account.";
+        if (message === "Unauthorized") {
+          clearAuthToken();
+          setAuthToken("");
+        } else {
+          setAccountError(message);
+        }
+      } finally {
+        if (active) setAccountLoading(false);
+      }
+    };
+    void loadAccount();
+    return () => { active = false; };
+  }, [authToken]);
 
   const addMessage = useCallback((message: ChatMessage, beforeMessageId?: string) => {
     setMessages((current) => {
@@ -215,6 +309,9 @@ export default function App() {
 
   const connectSocket = useCallback(async () => {
     if (socketReadyRef.current) return socketReadyRef.current;
+    if (!selectedToken || (audioResponseMode === "two_stage" && !selectedModel)) {
+      throw new Error("Choose an API token and, for two-stage replies, a Responses chat model first.");
+    }
     assistantMessageIdsByTurnRef.current.clear();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${location.host}/api/chat/ws`);
@@ -231,6 +328,9 @@ export default function App() {
           voice,
           language: languagePreference,
           history: historyRef.current,
+          apiKey: apiKeyFor(selectedToken),
+          chatModel: audioResponseMode === "two_stage" ? selectedModel : "",
+          audioResponseMode,
         }),
       );
     socket.onmessage = (event) => {
@@ -318,6 +418,9 @@ export default function App() {
     languagePreference,
     queuePcmAudio,
     stopMicrophone,
+    selectedModel,
+    selectedToken,
+    audioResponseMode,
     voice,
     waitForQueuedAudio,
   ]);
@@ -412,6 +515,48 @@ export default function App() {
       );
   }, [languagePreference, voice]);
 
+  const closeForConfigurationChange = useCallback(() => {
+    if (!socketRef.current) return;
+    stopMicrophone();
+    intentionalCloseRef.current = true;
+    socketRef.current.close();
+    setAutoListen(false);
+    setStatus("idle");
+  }, [stopMicrophone]);
+
+  const changeToken = (tokenId: number) => {
+    setSelectedTokenId(tokenId);
+    storeTokenId(tokenId);
+    closeForConfigurationChange();
+  };
+
+  const changeModel = (model: string) => {
+    setSelectedModel(model);
+    storeModel(model);
+    closeForConfigurationChange();
+  };
+
+  const changeAudioResponseMode = (mode: AudioResponseMode) => {
+    setAudioResponseMode(mode);
+    storeAudioResponseMode(mode);
+    closeForConfigurationChange();
+  };
+
+  const login = async (name: string, password: string, totpCode: string) => {
+    const result = await signIn(name, password, totpCode);
+    if (!result.token) throw new Error("Myna did not return a login token.");
+    storeAuthToken(result.token);
+    setUser(result.user || null);
+    setAuthToken(result.token);
+  };
+
+  const logout = () => {
+    stopListening();
+    clearAuthToken();
+    setAuthToken("");
+    setAccountError("");
+  };
+
   const sendText = useCallback(
     async (text: string) => {
       const normalized = text.trim();
@@ -451,6 +596,10 @@ export default function App() {
   };
   const isActive = status === "listening" || status === "speaking";
 
+  if (!authToken || accountLoading) {
+    return <LoginScreen loading={accountLoading} error={accountError} onLogin={login} />;
+  }
+
   return (
     <main className="voice-app min-h-screen overflow-x-hidden bg-[#10131b] text-slate-100 selection:bg-teal-200 selection:text-slate-950">
       <div className="grid-noise" />
@@ -470,8 +619,22 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span className="hidden sm:inline">Private conversation</span>
+            <span className="privacy-notice">Your conversation is kept in this browser.</span>
+            <span className="hidden sm:inline">{user?.nick_name || user?.name || "Myna account"}</span>
             <span className="status-dot status-dot-active" />
+            <button
+              className="settings-button"
+              onClick={() => setSettingsOpen(true)}
+              aria-controls="voice-settings"
+              aria-expanded={settingsOpen}
+              aria-label="Open settings"
+              title="Settings"
+            >
+              <SlidersHorizontal size={16} />
+            </button>
+            <button className="logout-button" onClick={logout} title="Sign out" aria-label="Sign out">
+              <LogOut size={16} />
+            </button>
           </div>
         </header>
         <div
@@ -505,7 +668,7 @@ export default function App() {
             id="chat-panel"
             role="tabpanel"
             aria-label="Chat"
-            className={`conversation-panel mobile-tab-panel flex h-[min(680px,calc(100dvh-7rem))] min-h-0 flex-col overflow-hidden lg:h-[min(720px,calc(100dvh-9rem))] ${mobileTab === "chat" ? "mobile-tab-visible" : ""}`}
+            className={`conversation-panel mobile-tab-panel flex h-[min(680px,calc(100dvh-7rem))] min-h-0 flex-col overflow-hidden lg:h-full ${mobileTab === "chat" ? "mobile-tab-visible" : ""}`}
           >
             <div className="flex items-center justify-between border-b border-white/10 px-5 py-4 sm:px-6">
               <div className="flex items-center gap-3">
@@ -554,7 +717,7 @@ export default function App() {
             <div className="border-t border-white/10 bg-black/10 p-4 sm:p-5">
               <div className="flex items-center gap-3">
                 <button
-                  disabled={isStarting}
+                  disabled={isStarting || !canStartSession}
                   onClick={() =>
                     autoListen ? stopListening() : void startListening()
                   }
@@ -594,9 +757,7 @@ export default function App() {
                     }
                   />
                   <button
-                    disabled={
-                      !draft.trim() || status === "thinking" || isStarting
-                    }
+                    disabled={!draft.trim() || status === "thinking" || isStarting || !canStartSession}
                     className="send-button"
                     aria-label="Send text message"
                   >
@@ -634,7 +795,7 @@ export default function App() {
             </div>
             <button
               onClick={() => setSettingsOpen(true)}
-              className="mobile-settings-button"
+              className="settings-button mobile-settings-button"
               aria-controls="voice-settings"
               aria-expanded={settingsOpen}
               aria-label="Open voice settings"
@@ -677,7 +838,7 @@ export default function App() {
                 </p>
               )}
               <button
-                disabled={isStarting}
+                disabled={isStarting || !canStartSession}
                 onClick={() =>
                   autoListen ? stopListening() : void startListening()
                 }
@@ -699,6 +860,27 @@ export default function App() {
                 )}
               </button>
             </div>
+            <button
+              disabled={isStarting || !canStartSession}
+              onClick={() =>
+                autoListen ? stopListening() : void startListening()
+              }
+              className={`session-button main-session-button ${autoListen ? "session-button-stop" : ""}`}
+            >
+              {isStarting ? (
+                <>
+                  <LoaderCircle size={17} className="animate-spin" /> Starting... {startupProgress}%
+                </>
+              ) : autoListen ? (
+                <>
+                  <Square size={16} fill="currentColor" /> End session
+                </>
+              ) : (
+                <>
+                  <Mic size={17} /> Start session
+                </>
+              )}
+            </button>
             <div
               id="voice-settings"
               className={`voice-controls space-y-4 border-t border-white/10 pt-5 ${settingsOpen ? "voice-controls-open" : ""}`}
@@ -712,6 +894,19 @@ export default function App() {
                 >
                   <X size={18} />
                 </button>
+              </div>
+              <div className="voice-settings">
+                <label>
+                  <span>Audio response</span>
+                  <select
+                    value={audioResponseMode}
+                    onChange={(event) => changeAudioResponseMode(event.target.value as AudioResponseMode)}
+                    disabled={isStarting}
+                  >
+                    <option value="direct">Direct audio</option>
+                    <option value="two_stage">Two-stage Responses</option>
+                  </select>
+                </label>
               </div>
               <div className="flex items-center justify-between text-xs text-slate-400">
                 <span>Spoken replies</span>
@@ -727,6 +922,32 @@ export default function App() {
                 </button>
               </div>
               <div className="voice-settings">
+                <label>
+                  <span>API token</span>
+                  <select
+                    value={selectedTokenId}
+                    onChange={(event) => changeToken(Number(event.target.value))}
+                    disabled={isStarting || apiTokens.length === 0}
+                  >
+                    {apiTokens.map((token) => (
+                      <option key={token.id} value={token.id}>{token.token_name || `token-${token.id}`}</option>
+                    ))}
+                  </select>
+                </label>
+                {audioResponseMode === "two_stage" && (
+                  <label>
+                    <span>Responses model</span>
+                    <select
+                      value={selectedModel}
+                      onChange={(event) => changeModel(event.target.value)}
+                      disabled={isStarting || models.length === 0}
+                    >
+                      {models.map((model) => (
+                        <option key={model.id} value={model.alias}>{model.title || model.alias}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 <label>
                   <span>Language</span>
                   <select
@@ -770,31 +991,10 @@ export default function App() {
                   </select>
                 </label>
               </div>
+              {accountError && <p className="settings-error">{accountError}</p>}
               <p className="text-[10px] leading-4 text-slate-500">
                 Echo uses an AI-generated voice.
               </p>
-              <button
-                disabled={isStarting}
-                onClick={() =>
-                  autoListen ? stopListening() : void startListening()
-                }
-                className={`session-button desktop-session-button ${autoListen ? "session-button-stop" : ""}`}
-              >
-                {isStarting ? (
-                  <>
-                    <LoaderCircle size={17} className="animate-spin" />{" "}
-                    Starting... {startupProgress}%
-                  </>
-                ) : autoListen ? (
-                  <>
-                    <Square size={16} fill="currentColor" /> End session
-                  </>
-                ) : (
-                  <>
-                    <Mic size={17} /> Start session
-                  </>
-                )}
-              </button>
             </div>
           </aside>
           {settingsOpen && (
@@ -805,9 +1005,6 @@ export default function App() {
             />
           )}
         </section>
-        <footer className="pt-1 text-center text-[11px] text-slate-600 sm:text-left">
-          Your conversation is kept in this browser.
-        </footer>
       </div>
     </main>
   );

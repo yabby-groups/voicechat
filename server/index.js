@@ -10,18 +10,20 @@ const app = express();
 const port = Number(process.env.PORT || 8787);
 let connectionSequence = 0;
 const openAIConfig = {
-  baseURL: process.env.OPENAI_BASE_URL,
+  baseURL: process.env.OPENAI_BASE_URL || 'https://huabot.com/v1',
   transcribeModel: process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-4o-mini-transcribe',
-  chatModel: process.env.OPENAI_CHAT_MODEL || 'gpt-5.6-luna',
   audioModel: process.env.OPENAI_AUDIO_MODEL || 'gpt-audio-mini',
-  audioVoice: process.env.OPENAI_AUDIO_VOICE || 'alloy',
-  audioResponseMode: process.env.OPENAI_AUDIO_RESPONSE_MODE || 'direct',
+  audioVoice: 'alloy',
+  audioResponseMode: 'direct',
   requestTimeoutMs: Number(process.env.OPENAI_REQUEST_TIMEOUT_MS || 30000),
 };
 
 app.use(cors());
 app.use(express.static(path.join(process.cwd(), 'dist')));
-app.get('/api/health', (_req, res) => res.json({ ok: true, configured: Boolean(process.env.OPENAI_API_KEY) }));
+app.get('/api/health', (_req, res) => res.json({
+  ok: true,
+  configured: true,
+}));
 
 const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
@@ -52,7 +54,7 @@ wss.on('connection', (socket) => {
   socket.on('error', (error) => log('socket_error', error.message));
 });
 
-server.listen(port, '127.0.0.1', () => console.log(`Voicechat API listening on http://127.0.0.1:${port} (OpenAI configured: ${Boolean(process.env.OPENAI_API_KEY)})`));
+server.listen(port, '127.0.0.1', () => console.log(`Voicechat API listening on http://127.0.0.1:${port}`));
 server.on('error', (error) => {
   console.error('Voicechat API server error:', error);
   process.exitCode = 1;

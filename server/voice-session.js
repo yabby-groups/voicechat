@@ -47,12 +47,27 @@ export class VoiceSession {
 
   async initialize(message) {
     this.preferences = preferences(message, this.config);
+    const apiKey = typeof message.apiKey === 'string' ? message.apiKey.trim() : '';
+    const chatModel = typeof message.chatModel === 'string' ? message.chatModel.trim() : '';
+    const audioResponseMode = message.audioResponseMode === undefined || message.audioResponseMode === ''
+      ? this.config.audioResponseMode
+      : message.audioResponseMode;
+    if (!apiKey) throw new Error('Select an API token before starting a voice session.');
+    if (!['direct', 'two_stage'].includes(audioResponseMode)) {
+      throw new Error('Audio response mode must be direct or two_stage.');
+    }
+    if (audioResponseMode === 'two_stage' && !chatModel) {
+      throw new Error('Select a Responses chat model before starting a two-stage voice session.');
+    }
+    this.apiKey = apiKey;
+    this.chatModel = chatModel;
+    this.audioResponseMode = audioResponseMode;
     this.history = historyFrom(message.history);
     const vad = await SileroVad.create();
     this.detector = new VadTurnDetector(vad);
     this.ready = true;
     this.send({ type: 'ready' });
-    this.log('ready', `history=${this.history.length} voice=${this.preferences.voice}`);
+    this.log('ready', `history=${this.history.length} voice=${this.preferences.voice} model=${this.chatModel} mode=${this.audioResponseMode}`);
   }
 
   async receive(message, isBinary) {
@@ -105,15 +120,16 @@ export class VoiceSession {
       const audio = wavFromFrames(frames);
       const userEntry = { role: 'user', text: '' };
       this.history.push(userEntry);
-      if (this.config.audioResponseMode === 'two_stage') {
+      if (this.responseMode() === 'two_stage') {
         this.log('transcription_start');
         const transcript = await this.transcribeAudioForTwoStage(audio, userEntry, turnId);
         const client = this.services.createOpenAIClient(
-          process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs,
+          this.apiKey, this.config.baseURL, this.config.requestTimeoutMs,
         );
         this.log('response_start');
         const result = await this.services.twoStageReply(client, {
           ...this.config,
+          chatModel: this.chatModel,
           audioVoice: this.preferences.voice,
           text: transcript.text,
           history: this.history.slice(0, -1),
@@ -131,7 +147,7 @@ export class VoiceSession {
       this.log('transcription_start');
       void this.transcribeAudioTurn(audio, userEntry, turnId);
       const client = this.services.createOpenAIClient(
-        process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs,
+        this.apiKey, this.config.baseURL, this.config.requestTimeoutMs,
       );
       this.log('response_start');
       const result = await this.services.streamAudioInputReply(client, {
@@ -156,7 +172,7 @@ export class VoiceSession {
   async transcribeAudioTurn(audio, userEntry, turnId) {
     try {
       const transcript = await this.services.transcribeAudio({
-        apiKey: process.env.OPENAI_API_KEY,
+        apiKey: this.apiKey,
         ...this.config,
         buffer: audio,
         mimetype: 'audio/wav',
@@ -184,7 +200,7 @@ export class VoiceSession {
     try {
       this.log('transcription_fallback_start');
       const client = this.services.createOpenAIClient(
-        process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs,
+        this.apiKey, this.config.baseURL, this.config.requestTimeoutMs,
       );
       const fallback = await this.services.streamAudioInputReply(client, {
         ...this.config,
@@ -221,13 +237,14 @@ export class VoiceSession {
       this.send({ type: 'turn_started', source: 'text' });
     }
     try {
-      const client = this.services.createOpenAIClient(process.env.OPENAI_API_KEY, this.config.baseURL, this.config.requestTimeoutMs);
+      const client = this.services.createOpenAIClient(this.apiKey, this.config.baseURL, this.config.requestTimeoutMs);
       this.log('response_start');
-      const service = this.config.audioResponseMode === 'two_stage'
+      const service = this.responseMode() === 'two_stage'
         ? this.services.twoStageReply
         : this.services.streamAudioReply;
       const result = await service(client, {
         ...this.config,
+        chatModel: this.chatModel,
         audioVoice: this.preferences.voice,
         text,
         history: this.history.slice(0, -1),
@@ -245,6 +262,10 @@ export class VoiceSession {
 
   async close() {
     this.detector?.reset();
+  }
+
+  responseMode() {
+    return this.audioResponseMode || this.config.audioResponseMode || 'direct';
   }
 }
 

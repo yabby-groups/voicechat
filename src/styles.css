@@ -299,6 +299,126 @@ button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
+.settings-error,
+.login-error {
+  margin: 0;
+  color: #fda4af;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+.logout-button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: transparent;
+  color: #cbd5e1;
+}
+.settings-button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: transparent;
+  color: #cbd5e1;
+}
+.settings-button:hover {
+  border-color: rgba(94, 234, 212, 0.55);
+  color: #b7f5e7;
+}
+.privacy-notice {
+  color: #64748b;
+  white-space: nowrap;
+}
+.logout-button:hover {
+  border-color: rgba(94, 234, 212, 0.55);
+  color: #b7f5e7;
+}
+.login-page {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 1.5rem;
+  background: #10131b;
+  color: #f8fafc;
+}
+.login-card {
+  width: min(100%, 420px);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: #17212a;
+  padding: clamp(1.5rem, 5vw, 2.5rem);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32);
+}
+.login-mark {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  color: #b7f5e7;
+  border: 1px solid rgba(94, 234, 212, 0.5);
+  background: #123734;
+}
+.login-kicker {
+  margin: 1.35rem 0 0.4rem;
+  color: rgba(183, 245, 231, 0.68);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.login-card h1 {
+  margin: 0;
+  font-size: 1.45rem;
+}
+.login-subtitle {
+  margin: 0.6rem 0 1.75rem;
+  color: #94a3b8;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+.login-form {
+  display: grid;
+  gap: 1rem;
+}
+.login-form label {
+  display: grid;
+  gap: 0.45rem;
+  color: #cbd5e1;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.login-form input {
+  min-width: 0;
+  height: 42px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 2px;
+  background: #101822;
+  color: #f8fafc;
+  padding: 0 0.75rem;
+  outline: none;
+}
+.login-form input:focus {
+  border-color: #5eead4;
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.12);
+}
+.login-submit {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border: 1px solid #5eead4;
+  background: #b7f5e7;
+  color: #123734;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.login-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 .session-button {
   display: flex;
   align-items: center;
@@ -325,6 +445,10 @@ button:disabled {
 }
 .session-button-stop:hover {
   background: #701a35;
+}
+.main-session-button {
+  width: min(100%, 280px);
+  margin-top: 1.75rem;
 }
 .mobile-settings-button,
 .mobile-session-button,
@@ -471,6 +595,9 @@ button:disabled {
       opacity 0.2s ease,
       transform 0.2s ease;
   }
+  .voice-settings {
+    grid-template-columns: 1fr;
+  }
   .voice-controls-open {
     opacity: 1;
     pointer-events: auto;
@@ -493,7 +620,7 @@ button:disabled {
     background: transparent;
     color: #cbd5e1;
   }
-  .desktop-session-button {
+  .main-session-button {
     display: none;
   }
   .voice-settings-backdrop {
@@ -529,5 +656,65 @@ button:disabled {
   .orbital-inner {
     width: 58px;
     height: 58px;
+  }
+}
+
+/* Settings are a single modal surface at every breakpoint. */
+.voice-controls {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 30;
+  display: grid;
+  width: min(calc(100vw - 2rem), 520px);
+  max-height: min(80dvh, 640px);
+  overflow-y: auto;
+  margin: 0;
+  padding: 1.5rem;
+  border: 1px solid rgba(94, 234, 212, 0.3);
+  background: #17212a;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -46%);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.voice-controls-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+}
+.voice-settings-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #f8fafc;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+.voice-settings-drawer-header button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: #cbd5e1;
+}
+.voice-settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: block;
+  border: 0;
+  background: rgba(0, 0, 0, 0.62);
+}
+@media (max-width: 640px) {
+  .privacy-notice {
+    display: none;
+  }
+  .voice-controls {
+    width: min(calc(100vw - 2rem), 420px);
+    padding: 1.25rem;
   }
 }

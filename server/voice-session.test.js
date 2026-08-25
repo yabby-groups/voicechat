@@ -8,6 +8,42 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('session initialization requires a user API token and Responses model before VAD setup', async () => {
+  const session = new VoiceSession(
+    { readyState: 1, send: () => undefined },
+    { audioVoice: 'alloy', audioResponseMode: 'two_stage' },
+  );
+  await assert.rejects(
+    session.initialize({ type: 'session', chatModel: 'gpt-5.6-luna' }),
+    /Select an API token/,
+  );
+  await assert.rejects(
+    session.initialize({ type: 'session', apiKey: 'sk-user-token' }),
+    /Select a Responses chat model/,
+  );
+});
+
+test('two-stage replies use the session user token and selected chat model', async () => {
+  const clientCalls = [];
+  const requests = [];
+  const session = new VoiceSession(
+    { readyState: 1, send: () => undefined },
+    { audioVoice: 'alloy', audioResponseMode: 'two_stage', baseURL: 'https://myna.example/v1' },
+    () => undefined,
+    {
+      createOpenAIClient: (...args) => { clientCalls.push(args); return {}; },
+      twoStageReply: async (_client, request) => { requests.push(request); return { assistantText: 'Reply' }; },
+    },
+  );
+  session.apiKey = 'sk-user-token';
+  session.chatModel = 'gpt-responses-model';
+
+  await session.receiveText({ text: 'Hello' });
+
+  assert.deepEqual(clientCalls, [['sk-user-token', 'https://myna.example/v1', undefined]]);
+  assert.equal(requests[0].chatModel, 'gpt-responses-model');
+});
+
 test('audio reply starts before asynchronous transcription completes', async () => {
   const transcript = deferred();
   const sent = [];

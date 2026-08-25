@@ -32,7 +32,7 @@ export function normalizeHistory(history) {
 }
 
 export function createOpenAIClient(apiKey, baseURL, requestTimeoutMs) {
-  if (!apiKey) throw new Error('Server is missing OPENAI_API_KEY. Add it to .env and restart.');
+  if (!apiKey) throw new Error('A user API token is required for this voice session.');
   return new OpenAI({
     apiKey,
     ...(baseURL ? { baseURL } : {}),
