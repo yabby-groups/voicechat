@@ -49,9 +49,10 @@ export class VoiceSession {
     this.preferences = preferences(message, this.config);
     const apiKey = typeof message.apiKey === 'string' ? message.apiKey.trim() : '';
     const chatModel = typeof message.chatModel === 'string' ? message.chatModel.trim() : '';
-    const audioResponseMode = message.audioResponseMode === undefined || message.audioResponseMode === ''
+    const requestedResponseMode = message.audioResponseMode === undefined || message.audioResponseMode === ''
       ? this.config.audioResponseMode
       : message.audioResponseMode;
+    const audioResponseMode = this.config.webSearch?.enabled ? 'two_stage' : requestedResponseMode;
     if (!apiKey) throw new Error('Select an API token before starting a voice session.');
     if (!['direct', 'two_stage'].includes(audioResponseMode)) {
       throw new Error('Audio response mode must be direct or two_stage.');
@@ -67,7 +68,7 @@ export class VoiceSession {
     this.detector = new VadTurnDetector(vad);
     this.ready = true;
     this.send({ type: 'ready' });
-    this.log('ready', `history=${this.history.length} voice=${this.preferences.voice} model=${this.chatModel} mode=${this.audioResponseMode}`);
+    this.log('ready', `history=${this.history.length} voice=${this.preferences.voice} model=${this.chatModel} mode=${this.audioResponseMode} web_search=${Boolean(this.config.webSearch?.enabled)}`);
   }
 
   async receive(message, isBinary) {
@@ -136,6 +137,7 @@ export class VoiceSession {
           language: this.preferences.language,
           includeAudio: false,
           onAudioChunk: (data) => this.sendAudio(data),
+          mcp: this.mcpForTurn(),
         });
         this.history.push({ role: 'assistant', text: result.assistantText });
         this.send({
@@ -158,6 +160,7 @@ export class VoiceSession {
         language: this.preferences.language,
         includeAudio: false,
         onAudioChunk: (data) => this.sendAudio(data),
+        mcp: this.mcpForTurn(),
       });
       this.history.push({ role: 'assistant', text: result.assistantText });
       this.send({
@@ -251,6 +254,7 @@ export class VoiceSession {
         language,
         includeAudio: false,
         onAudioChunk: (data) => this.sendAudio(data),
+        mcp: this.mcpForTurn(),
       });
       this.history.push({ role: 'assistant', text: result.assistantText });
       this.send({ type: 'complete', assistantText: result.assistantText, language });
@@ -265,7 +269,16 @@ export class VoiceSession {
   }
 
   responseMode() {
+    if (this.config.webSearch?.enabled) return 'two_stage';
     return this.audioResponseMode || this.config.audioResponseMode || 'direct';
+  }
+
+  mcpForTurn() {
+    if (!this.config.webSearch?.enabled) return null;
+    return {
+      ...this.config.webSearch,
+      onActivity: (event) => this.send(event),
+    };
   }
 }
 

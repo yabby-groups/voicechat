@@ -13,6 +13,7 @@
     "test": "node --test server/**/*.test.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@ricky0123/vad-web": "^0.0.30",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",

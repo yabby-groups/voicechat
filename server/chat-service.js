@@ -139,20 +139,35 @@ export async function streamAudioInputReply(client, {
 }
 
 export async function twoStageReply(client, {
-  chatModel, audioModel, audioVoice, text, history = [], language, onAudioChunk, includeAudio = true,
+  chatModel, audioModel, audioVoice, text, history = [], language, onAudioChunk, includeAudio = true, mcp,
 }) {
-  const response = await client.responses.create({
-    model: chatModel,
-    input: [
-      {
-        role: 'system',
-        content:
-          `You are Echo, a thoughtful voice companion. ${languageInstruction(language)} Keep spoken answers concise, natural, and useful. Do not use markdown.`,
-      },
-      ...normalizeHistory(history),
-      { role: 'user', content: text },
-    ],
-  });
+  const tools = await mcp?.functionTools() || [];
+  let input = [
+    {
+      role: 'system',
+      content:
+        `You are Echo, a thoughtful voice companion. ${languageInstruction(language)} Keep spoken answers concise, natural, and useful. Do not use markdown.`,
+    },
+    ...normalizeHistory(history),
+    { role: 'user', content: text },
+  ];
+  let response;
+  for (let attempts = 0; attempts < 4; attempts += 1) {
+    response = await client.responses.create({
+      model: chatModel,
+      input,
+      ...(tools.length ? { tools, parallel_tool_calls: false } : {}),
+    });
+    const calls = (response.output || []).filter((item) => item.type === 'function_call');
+    if (!calls.length) break;
+    const outputs = await Promise.all(calls.map(async (call) => ({
+      type: 'function_call_output',
+      call_id: call.call_id,
+      output: await mcp.call(call.name, call.arguments, mcp.onActivity),
+    })));
+    input = [...response.output, ...outputs];
+  }
+  if (!response) throw new Error('The assistant did not return a response.');
   const assistantText = response.output_text.trim();
   if (!assistantText) throw new Error('The assistant returned an empty response.');
   const speech = await synthesizeSpeech(client, {

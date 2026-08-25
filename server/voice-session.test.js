@@ -44,6 +44,40 @@ test('two-stage replies use the session user token and selected chat model', asy
   assert.equal(requests[0].chatModel, 'gpt-responses-model');
 });
 
+test('web search forces a text turn through the staged reply service and reports tool activity', async () => {
+  const sent = [];
+  const requests = [];
+  const session = new VoiceSession(
+    { readyState: 1, send: (event) => sent.push(JSON.parse(event)) },
+    {
+      audioVoice: 'alloy', audioResponseMode: 'direct',
+      webSearch: {
+        enabled: true,
+        functionTools: async () => [],
+        call: async () => '',
+      },
+    },
+    () => undefined,
+    {
+      createOpenAIClient: () => ({}),
+      streamAudioReply: async () => { throw new Error('direct service should not run'); },
+      twoStageReply: async (_client, request) => {
+        requests.push(request);
+        request.mcp.onActivity({ type: 'tool_call', label: 'Brave Search', name: 'web_search' });
+        return { assistantText: 'Web result' };
+      },
+    },
+  );
+  session.apiKey = 'sk-user-token';
+  session.chatModel = 'gpt-responses-model';
+
+  await session.receiveText({ text: 'Search for news' });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].mcp.enabled, true);
+  assert.deepEqual(sent.map((event) => event.type), ['turn_started', 'tool_call', 'complete']);
+});
+
 test('audio reply starts before asynchronous transcription completes', async () => {
   const transcript = deferred();
   const sent = [];

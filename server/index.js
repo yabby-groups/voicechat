@@ -5,6 +5,7 @@ import cors from 'cors';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { VoiceSession } from './voice-session.js';
+import { BraveSearchMcp, braveMcpConfigFromEnv } from './mcp-service.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -17,12 +18,23 @@ const openAIConfig = {
   audioResponseMode: 'direct',
   requestTimeoutMs: Number(process.env.OPENAI_REQUEST_TIMEOUT_MS || 30000),
 };
+const braveMcpConfig = braveMcpConfigFromEnv();
+const webSearch = new BraveSearchMcp(braveMcpConfig, (event, details) => console.info(`[voicechat:mcp] ${event}${details ? ` ${details}` : ''}`));
+const sessionConfig = {
+  ...openAIConfig,
+  webSearch: braveMcpConfig.enabled ? {
+    enabled: true,
+    functionTools: () => webSearch.functionTools(),
+    call: (...args) => webSearch.call(...args),
+  } : null,
+};
 
 app.use(cors());
 app.use(express.static(path.join(process.cwd(), 'dist')));
 app.get('/api/health', (_req, res) => res.json({
   ok: true,
   configured: true,
+  webSearchEnabled: braveMcpConfig.enabled,
 }));
 
 const server = createServer(app);
@@ -40,7 +52,7 @@ wss.on('connection', (socket) => {
   const id = `ws-${++connectionSequence}`;
   const startedAt = performance.now();
   const log = (event, details = '') => console.info(`[voicechat:${id}] +${(performance.now() - startedAt).toFixed(0)}ms ${event}${details ? ` ${details}` : ''}`);
-  const session = new VoiceSession(socket, openAIConfig, log);
+  const session = new VoiceSession(socket, sessionConfig, log);
   socket.on('message', (data, isBinary) => {
     void session.receive(data, isBinary).catch((error) => {
       const message = error instanceof Error ? error.message : 'Unable to complete the request.';
@@ -59,3 +71,4 @@ server.on('error', (error) => {
   console.error('Voicechat API server error:', error);
   process.exitCode = 1;
 });
+server.on('close', () => void webSearch.close());

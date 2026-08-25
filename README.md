@@ -17,6 +17,12 @@ Speak naturally after starting a session. The browser sends 16 kHz mono PCM16 mi
 
 All chat interaction uses `/api/chat/ws`. Client JSON messages initialize the session, update preferences, or submit text; microphone audio and assistant audio use binary PCM16 WebSocket frames. Server messages report readiness, speech/turn state, transcripts, completion, and errors. Assistant PCM chunks are played with Web Audio after a 120 ms buffer.
 
+## Optional web search
+
+Echo can use a deployment-managed Brave MCP server for read-only web search. Set `WEB_SEARCH_ENABLED=true`, the trusted HTTPS `BRAVE_MCP_SERVER_URL`, its authentication header/value, and the exact allowed search tool names in `BRAVE_MCP_ALLOWED_TOOLS`. These credentials stay on the Node server; never place them in a `VITE_` variable.
+
+When enabled, Echo uses the two-stage Responses path for every turn so the model can call the approved search tools, then speaks the final answer with the configured audio model. The UI shows search activity, but does not expose MCP configuration or permit arbitrary tool calls.
+
 ## Commands
 
 - `npm run dev`: start Vite and the API service together.

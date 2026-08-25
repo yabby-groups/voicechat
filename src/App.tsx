@@ -85,7 +85,8 @@ function getStoredLanguage(): LanguagePreference {
   return language === "zh" || language === "en" ? language : "auto";
 }
 
-function labelFor(status: VoiceStatus) {
+function labelFor(status: VoiceStatus, toolActivity = "") {
+  if (toolActivity) return toolActivity;
   return {
     idle: "Ready to listen",
     listening: "Listening",
@@ -143,6 +144,8 @@ export default function App() {
   );
   const [accountLoading, setAccountLoading] = useState(Boolean(getStoredAuthToken()));
   const [accountError, setAccountError] = useState("");
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [toolActivity, setToolActivity] = useState("");
   const historyRef = useRef(messages);
   const mutedRef = useRef(muted);
   const startingRef = useRef(false);
@@ -160,8 +163,9 @@ export default function App() {
   const captureContextRef = useRef<AudioContext | null>(null);
   const captureNodeRef = useRef<AudioWorkletNode | null>(null);
   const selectedToken = apiTokens.find((token) => token.id === selectedTokenId) || null;
+  const effectiveAudioResponseMode: AudioResponseMode = webSearchEnabled ? "two_stage" : audioResponseMode;
   const canStartSession = Boolean(
-    selectedToken && !accountLoading && (audioResponseMode === "direct" || selectedModel),
+    selectedToken && !accountLoading && (effectiveAudioResponseMode === "direct" || selectedModel),
   );
 
   useEffect(() => {
@@ -249,6 +253,16 @@ export default function App() {
     void loadAccount();
     return () => { active = false; };
   }, [authToken]);
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/health")
+      .then((response) => response.ok ? response.json() : null)
+      .then((health: { webSearchEnabled?: boolean } | null) => {
+        if (active) setWebSearchEnabled(Boolean(health?.webSearchEnabled));
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
 
   const addMessage = useCallback((message: ChatMessage, beforeMessageId?: string) => {
     setMessages((current) => {
@@ -309,7 +323,7 @@ export default function App() {
 
   const connectSocket = useCallback(async () => {
     if (socketReadyRef.current) return socketReadyRef.current;
-    if (!selectedToken || (audioResponseMode === "two_stage" && !selectedModel)) {
+    if (!selectedToken || (effectiveAudioResponseMode === "two_stage" && !selectedModel)) {
       throw new Error("Choose an API token and, for two-stage replies, a Responses chat model first.");
     }
     assistantMessageIdsByTurnRef.current.clear();
@@ -329,8 +343,8 @@ export default function App() {
           language: languagePreference,
           history: historyRef.current,
           apiKey: apiKeyFor(selectedToken),
-          chatModel: audioResponseMode === "two_stage" ? selectedModel : "",
-          audioResponseMode,
+          chatModel: effectiveAudioResponseMode === "two_stage" ? selectedModel : "",
+          audioResponseMode: effectiveAudioResponseMode,
         }),
       );
     socket.onmessage = (event) => {
@@ -345,6 +359,7 @@ export default function App() {
         language?: string;
         error?: string;
         turnId?: number;
+        label?: string;
       };
       if (message.type === "ready") {
         resolveReadyRef.current?.();
@@ -361,6 +376,10 @@ export default function App() {
         setStatus("thinking");
         return;
       }
+      if (message.type === "tool_call") {
+        setToolActivity(message.label ? `Searching with ${message.label}` : "Searching the web");
+        return;
+      }
       if (message.type === "transcript" && message.text) {
         const messageId = crypto.randomUUID();
         addMessage({
@@ -375,6 +394,7 @@ export default function App() {
         return;
       }
       if (message.type === "complete" && message.assistantText) {
+        setToolActivity("");
         const messageId = crypto.randomUUID();
         addMessage({
           id: messageId,
@@ -393,6 +413,7 @@ export default function App() {
         return;
       }
       if (message.type === "error") {
+        setToolActivity("");
         setError(message.error || "Voice request failed.");
         setStatus("error");
       }
@@ -420,7 +441,7 @@ export default function App() {
     stopMicrophone,
     selectedModel,
     selectedToken,
-    audioResponseMode,
+    effectiveAudioResponseMode,
     voice,
     waitForQueuedAudio,
   ]);
@@ -668,7 +689,7 @@ export default function App() {
             id="chat-panel"
             role="tabpanel"
             aria-label="Chat"
-            className={`conversation-panel mobile-tab-panel flex h-[min(680px,calc(100dvh-7rem))] min-h-0 flex-col overflow-hidden lg:h-full ${mobileTab === "chat" ? "mobile-tab-visible" : ""}`}
+            className={`conversation-panel mobile-tab-panel flex h-[min(680px,calc(100dvh-7rem))] min-h-0 flex-col overflow-hidden lg:h-[min(720px,calc(100dvh-9rem))] ${mobileTab === "chat" ? "mobile-tab-visible" : ""}`}
           >
             <div className="flex items-center justify-between border-b border-white/10 px-5 py-4 sm:px-6">
               <div className="flex items-center gap-3">
@@ -677,7 +698,7 @@ export default function App() {
                 />
                 <div>
                   <p className="text-sm font-medium text-slate-100">Echo</p>
-                  <p className="text-xs text-slate-400">{labelFor(status)}</p>
+                  <p className="text-xs text-slate-400">{labelFor(status, toolActivity)}</p>
                 </div>
               </div>
               <button onClick={clearConversation} className="clear-button">
@@ -811,7 +832,7 @@ export default function App() {
               </div>
               <Waveform status={status} />
               <p className="mt-7 text-sm font-medium text-slate-100">
-                {isStarting ? "Starting microphone..." : labelFor(status)}
+                {isStarting ? "Starting microphone..." : labelFor(status, toolActivity)}
               </p>
               <p className="mt-2 max-w-56 text-center text-xs leading-5 text-slate-500">
                 {isStarting
@@ -899,9 +920,9 @@ export default function App() {
                 <label>
                   <span>Audio response</span>
                   <select
-                    value={audioResponseMode}
+                    value={effectiveAudioResponseMode}
                     onChange={(event) => changeAudioResponseMode(event.target.value as AudioResponseMode)}
-                    disabled={isStarting}
+                    disabled={isStarting || webSearchEnabled}
                   >
                     <option value="direct">Direct audio</option>
                     <option value="two_stage">Two-stage Responses</option>
@@ -934,7 +955,7 @@ export default function App() {
                     ))}
                   </select>
                 </label>
-                {audioResponseMode === "two_stage" && (
+                {effectiveAudioResponseMode === "two_stage" && (
                   <label>
                     <span>Responses model</span>
                     <select

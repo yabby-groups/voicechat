@@ -111,3 +111,46 @@ test('twoStageReply streams synthesized PCM chunks without retaining a WAV', asy
   assert.equal('audio' in result, false);
   assert.deepEqual(sentChunks, ['AQI=']);
 });
+
+test('twoStageReply executes allowed MCP function calls before speaking the final answer', async () => {
+  const requests = [];
+  const calls = [];
+  const client = {
+    responses: { create: async (request) => {
+      requests.push(request);
+      if (requests.length === 1) {
+        return {
+          output: [{ type: 'function_call', call_id: 'call_1', name: 'web_search', arguments: '{"query":"latest news"}' }],
+          output_text: '',
+        };
+      }
+      return { output: [], output_text: 'Here is the latest news.' };
+    } },
+    chat: { completions: { create: async () => (async function* () {
+      yield { choices: [{ delta: { audio: { data: 'AQI=' } } }] };
+    }()) } },
+  };
+  const activity = [];
+  const result = await twoStageReply(client, {
+    chatModel: 'gpt-5.6-luna', audioModel: 'gpt-audio-mini', audioVoice: 'alloy', text: 'What is new?',
+    includeAudio: false,
+    mcp: {
+      functionTools: async () => [{ type: 'function', name: 'web_search', description: 'Search', parameters: { type: 'object' } }],
+      call: async (name, args, onActivity) => {
+        calls.push({ name, args });
+        onActivity({ type: 'tool_call', label: 'Brave Search', name });
+        return '{"results":["A headline"]}';
+      },
+      onActivity: (event) => activity.push(event),
+    },
+  });
+
+  assert.equal(result.assistantText, 'Here is the latest news.');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].tools[0].name, 'web_search');
+  assert.equal(calls[0].name, 'web_search');
+  assert.deepEqual(activity, [{ type: 'tool_call', label: 'Brave Search', name: 'web_search' }]);
+  assert.deepEqual(requests[1].input.at(-1), {
+    type: 'function_call_output', call_id: 'call_1', output: '{"results":["A headline"]}',
+  });
+});
