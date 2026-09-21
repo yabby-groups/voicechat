@@ -5,6 +5,39 @@ export type MynaUser = {
   nick_name?: string;
 };
 
+type OAuthServerMetadata = {
+  device_authorization_endpoint: string;
+  token_endpoint: string;
+  revocation_endpoint?: string;
+};
+
+type OAuthTokenResponse = {
+  access_token: string;
+  refresh_token?: string;
+  expires_in: number;
+  scope: string;
+};
+
+export type OAuthSession = {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  scope: string;
+};
+
+type PendingDeviceAuthorization = {
+  clientId: string;
+  deviceCode: string;
+  interval: number;
+  expiresAt: number;
+};
+
+export type DeviceAuthorization = {
+  verificationUri: string;
+  verificationUriComplete: string;
+  expiresIn: number;
+};
+
 export type TokenBaseToken = {
   id: number;
   token_name: string;
@@ -21,7 +54,9 @@ export type TokenBaseModel = {
   api_modes?: string[] | string;
 };
 
-const AUTH_STORAGE_KEY = "echo-voicechat-myna-auth-v1";
+const AUTH_STORAGE_KEY = "echo-voicechat-myna-oauth-v1";
+const LEGACY_AUTH_STORAGE_KEY = "echo-voicechat-myna-auth-v1";
+const PENDING_DEVICE_AUTHORIZATION_STORAGE_KEY = "echo-voicechat-myna-device-auth-v1";
 const TOKEN_SELECTION_STORAGE_KEY = "echo-voicechat-token-id-v1";
 const MODEL_SELECTION_STORAGE_KEY = "echo-voicechat-model-v1";
 const AUDIO_RESPONSE_MODE_STORAGE_KEY = "echo-voicechat-audio-response-mode-v1";
@@ -34,8 +69,12 @@ function defaultMynaBaseUrl() {
   return `${window.location.protocol}//${window.location.host}`;
 }
 
-const viteEnv = (import.meta as ImportMeta & { env?: { VITE_MYNA_BASE_URL?: string } }).env;
+const viteEnv = (import.meta as ImportMeta & {
+  env?: { VITE_MYNA_BASE_URL?: string; VITE_MYNA_OAUTH_CLIENT_ID?: string };
+}).env;
 export const mynaBaseUrl = (viteEnv?.VITE_MYNA_BASE_URL || defaultMynaBaseUrl()).replace(/\/+$/, "");
+export const mynaOAuthClientId = viteEnv?.VITE_MYNA_OAUTH_CLIENT_ID?.trim() || "";
+const OAUTH_SCOPES = "profile:read token_base:read token_base:write offline_access";
 
 function responseError(response: Response, body: unknown) {
   if (typeof body === "object" && body && "err" in body && typeof body.err === "string") {
@@ -56,7 +95,7 @@ function responseError(response: Response, body: unknown) {
 async function request<T>(path: string, options: RequestInit = {}, authToken?: string): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set("Accept", "application/json");
-  if (authToken) headers.set("X-REQUEST-TOKEN", authToken);
+  if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
   if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(`${mynaBaseUrl}${path}`, { ...options, headers });
   const body: unknown = await response.json().catch(() => null);
@@ -67,15 +106,218 @@ async function request<T>(path: string, options: RequestInit = {}, authToken?: s
 }
 
 export function getStoredAuthToken() {
-  return localStorage.getItem(AUTH_STORAGE_KEY) || "";
+  return getStoredOAuthSession()?.accessToken || "";
 }
 
-export function storeAuthToken(token: string) {
-  localStorage.setItem(AUTH_STORAGE_KEY, token);
+function getStoredOAuthSession(): OAuthSession | null {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const session = JSON.parse(raw) as Partial<OAuthSession>;
+    if (
+      typeof session.accessToken !== "string" ||
+      typeof session.refreshToken !== "string" ||
+      typeof session.expiresAt !== "number" ||
+      typeof session.scope !== "string"
+    )
+      return null;
+    return session as OAuthSession;
+  } catch {
+    return null;
+  }
+}
+
+function storeOAuthSession(token: OAuthTokenResponse) {
+  if (!token.refresh_token) throw new Error("Myna did not return a refresh token.");
+  const session: OAuthSession = {
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token,
+    expiresAt: Date.now() + token.expires_in * 1000,
+    scope: token.scope,
+  };
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(session));
+  return session;
 }
 
 export function clearAuthToken() {
   localStorage.removeItem(AUTH_STORAGE_KEY);
+  localStorage.removeItem(LEGACY_AUTH_STORAGE_KEY);
+}
+
+function responseMessage(response: Response, body: unknown) {
+  if (typeof body === "object" && body && "error_description" in body && typeof body.error_description === "string") {
+    return body.error_description;
+  }
+  return responseError(response, body).message;
+}
+
+async function oauthForm<T>(endpoint: string, body: URLSearchParams): Promise<T> {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+    body,
+  });
+  const result: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(responseMessage(response, result)) as Error & { code?: string };
+    if (typeof result === "object" && result && "error" in result && typeof result.error === "string") {
+      error.code = result.error;
+    }
+    throw error;
+  }
+  return result as T;
+}
+
+let oauthMetadataPromise: Promise<OAuthServerMetadata> | null = null;
+
+async function oauthMetadata() {
+  oauthMetadataPromise ||= fetch(`${mynaBaseUrl}/.well-known/oauth-authorization-server`, {
+    headers: { Accept: "application/json" },
+  }).then(async (response) => {
+    const metadata: unknown = await response.json().catch(() => null);
+    if (!response.ok || !metadata || typeof metadata !== "object") {
+      throw new Error("Unable to discover Myna OAuth endpoints.");
+    }
+    const value = metadata as Partial<OAuthServerMetadata>;
+    if (!value.device_authorization_endpoint || !value.token_endpoint) {
+      throw new Error("Myna OAuth device authorization is unavailable.");
+    }
+    return value as OAuthServerMetadata;
+  });
+  try {
+    return await oauthMetadataPromise;
+  } catch (error) {
+    oauthMetadataPromise = null;
+    throw error;
+  }
+}
+
+function requireOAuthClientId() {
+  if (!mynaOAuthClientId) throw new Error("VoiceChat OAuth is not configured. Set VITE_MYNA_OAUTH_CLIENT_ID.");
+  return mynaOAuthClientId;
+}
+
+function storePendingAuthorization(pending: PendingDeviceAuthorization) {
+  sessionStorage.setItem(PENDING_DEVICE_AUTHORIZATION_STORAGE_KEY, JSON.stringify(pending));
+}
+
+function getPendingAuthorization(): PendingDeviceAuthorization | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_DEVICE_AUTHORIZATION_STORAGE_KEY);
+    if (!raw) return null;
+    const pending = JSON.parse(raw) as Partial<PendingDeviceAuthorization>;
+    if (
+      typeof pending.clientId !== "string" ||
+      typeof pending.deviceCode !== "string" ||
+      typeof pending.interval !== "number" ||
+      typeof pending.expiresAt !== "number" ||
+      pending.expiresAt <= Date.now()
+    ) {
+      sessionStorage.removeItem(PENDING_DEVICE_AUTHORIZATION_STORAGE_KEY);
+      return null;
+    }
+    return pending as PendingDeviceAuthorization;
+  } catch {
+    sessionStorage.removeItem(PENDING_DEVICE_AUTHORIZATION_STORAGE_KEY);
+    return null;
+  }
+}
+
+function clearPendingAuthorization() {
+  sessionStorage.removeItem(PENDING_DEVICE_AUTHORIZATION_STORAGE_KEY);
+}
+
+export async function beginDeviceAuthorization(completionAction?: "return") {
+  const clientId = requireOAuthClientId();
+  const metadata = await oauthMetadata();
+  const body = new URLSearchParams({ client_id: clientId, scope: OAUTH_SCOPES });
+  if (completionAction) body.set("completion_action", completionAction);
+  const authorization = await oauthForm<{
+    device_code: string;
+    verification_uri: string;
+    verification_uri_complete?: string;
+    expires_in: number;
+    interval: number;
+  }>(metadata.device_authorization_endpoint, body);
+  storePendingAuthorization({
+    clientId,
+    deviceCode: authorization.device_code,
+    interval: Math.max(1, authorization.interval || 3),
+    expiresAt: Date.now() + authorization.expires_in * 1000,
+  });
+  return {
+    verificationUri: authorization.verification_uri,
+    verificationUriComplete: authorization.verification_uri_complete || authorization.verification_uri,
+    expiresIn: authorization.expires_in,
+  } satisfies DeviceAuthorization;
+}
+
+function wait(delayMs: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+}
+
+export async function resumeDeviceAuthorization() {
+  const pending = getPendingAuthorization();
+  if (!pending) return null;
+  const metadata = await oauthMetadata();
+  let interval = pending.interval;
+  while (Date.now() < pending.expiresAt) {
+    await wait(interval * 1000);
+    try {
+      const token = await oauthForm<OAuthTokenResponse>(metadata.token_endpoint, new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        client_id: pending.clientId,
+        device_code: pending.deviceCode,
+      }));
+      const session = storeOAuthSession(token);
+      clearPendingAuthorization();
+      return session;
+    } catch (error) {
+      const code = (error as Error & { code?: string }).code;
+      if (code === "authorization_pending") continue;
+      if (code === "slow_down") {
+        interval += 5;
+        continue;
+      }
+      clearPendingAuthorization();
+      throw error;
+    }
+  }
+  clearPendingAuthorization();
+  throw new Error("Authorization expired. Start again.");
+}
+
+export async function restoreOAuthSession() {
+  const session = getStoredOAuthSession();
+  if (!session) return null;
+  if (session.expiresAt > Date.now() + 60_000) return session;
+  const metadata = await oauthMetadata();
+  try {
+    return storeOAuthSession(await oauthForm<OAuthTokenResponse>(metadata.token_endpoint, new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: requireOAuthClientId(),
+      refresh_token: session.refreshToken,
+    })));
+  } catch (error) {
+    clearAuthToken();
+    throw error;
+  }
+}
+
+export async function revokeOAuthSession() {
+  const session = getStoredOAuthSession();
+  clearAuthToken();
+  if (!session) return;
+  try {
+    const metadata = await oauthMetadata();
+    if (!metadata.revocation_endpoint) return;
+    await oauthForm<unknown>(metadata.revocation_endpoint, new URLSearchParams({
+      client_id: requireOAuthClientId(),
+      token: session.refreshToken,
+    }));
+  } catch {
+    // Local sign-out must not depend on network availability.
+  }
 }
 
 export function getStoredTokenId() {
@@ -103,16 +345,6 @@ export function getStoredAudioResponseMode(): AudioResponseMode | "" {
 
 export function storeAudioResponseMode(mode: AudioResponseMode) {
   localStorage.setItem(AUDIO_RESPONSE_MODE_STORAGE_KEY, mode);
-}
-
-export function signIn(name: string, passwd: string, totpCode?: string) {
-  const body = new URLSearchParams({ name, passwd });
-  if (totpCode) body.set("totp_code", totpCode);
-  return request<{ token: string; user: MynaUser }>("/api/signin/", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-    body,
-  });
 }
 
 export function getCurrentUser(authToken: string) {

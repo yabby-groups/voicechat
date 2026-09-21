@@ -18,17 +18,18 @@ import type { ChatMessage, VoiceStatus } from "./types";
 import LoginScreen from "./LoginScreen";
 import {
   apiKeyFor,
+  beginDeviceAuthorization,
   clearAuthToken,
   createVoicechatToken,
   getCurrentUser,
-  getStoredAuthToken,
   getStoredAudioResponseMode,
   getStoredModel,
   getStoredTokenId,
   listMyTokens,
   listResponseModels,
-  signIn,
-  storeAuthToken,
+  restoreOAuthSession,
+  resumeDeviceAuthorization,
+  revokeOAuthSession,
   storeAudioResponseMode,
   storeModel,
   storeTokenId,
@@ -133,7 +134,8 @@ export default function App() {
   const [isStarting, setIsStarting] = useState(false);
   const [startupProgress, setStartupProgress] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [authToken, setAuthToken] = useState(getStoredAuthToken);
+  const [authToken, setAuthToken] = useState("");
+  const [authReady, setAuthReady] = useState(false);
   const [user, setUser] = useState<MynaUser | null>(null);
   const [apiTokens, setApiTokens] = useState<TokenBaseToken[]>([]);
   const [models, setModels] = useState<TokenBaseModel[]>([]);
@@ -142,7 +144,7 @@ export default function App() {
   const [audioResponseMode, setAudioResponseMode] = useState<AudioResponseMode>(
     () => getStoredAudioResponseMode() || "direct",
   );
-  const [accountLoading, setAccountLoading] = useState(Boolean(getStoredAuthToken()));
+  const [accountLoading, setAccountLoading] = useState(true);
   const [accountError, setAccountError] = useState("");
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [toolActivity, setToolActivity] = useState("");
@@ -199,6 +201,29 @@ export default function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [settingsOpen]);
   useEffect(() => {
+    let active = true;
+    const restoreAuthorization = async () => {
+      try {
+        const session = await restoreOAuthSession();
+        if (session) {
+          if (active) setAuthToken(session.accessToken);
+          return;
+        }
+        const pendingSession = await resumeDeviceAuthorization();
+        if (pendingSession && active) setAuthToken(pendingSession.accessToken);
+      } catch (caught) {
+        if (active) {
+          setAccountError(caught instanceof Error ? caught.message : "Unable to restore authorization.");
+        }
+      } finally {
+        if (active) setAuthReady(true);
+      }
+    };
+    void restoreAuthorization();
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (!authReady) return;
     if (!authToken) {
       setUser(null);
       setApiTokens([]);
@@ -252,7 +277,7 @@ export default function App() {
     };
     void loadAccount();
     return () => { active = false; };
-  }, [authToken]);
+  }, [authReady, authToken]);
   useEffect(() => {
     let active = true;
     void fetch("/api/health")
@@ -563,17 +588,29 @@ export default function App() {
     closeForConfigurationChange();
   };
 
-  const login = async (name: string, password: string, totpCode: string) => {
-    const result = await signIn(name, password, totpCode);
-    if (!result.token) throw new Error("Myna did not return a login token.");
-    storeAuthToken(result.token);
-    setUser(result.user || null);
-    setAuthToken(result.token);
+  const login = async () => {
+    const inWeChat = /MicroMessenger/i.test(navigator.userAgent);
+    const loginWindow = inWeChat ? null : window.open("", "_blank");
+    const useSameTab = inWeChat || !loginWindow;
+    let authorization;
+    try {
+      authorization = await beginDeviceAuthorization(useSameTab ? "return" : undefined);
+    } catch (error) {
+      loginWindow?.close();
+      throw error;
+    }
+    if (useSameTab) {
+      window.location.assign(authorization.verificationUriComplete || authorization.verificationUri);
+      return;
+    }
+    loginWindow.location.replace(authorization.verificationUriComplete || authorization.verificationUri);
+    const session = await resumeDeviceAuthorization();
+    if (session) setAuthToken(session.accessToken);
   };
 
   const logout = () => {
     stopListening();
-    clearAuthToken();
+    void revokeOAuthSession();
     setAuthToken("");
     setAccountError("");
   };

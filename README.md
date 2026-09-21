@@ -4,14 +4,14 @@ An OpenAI-backed continuous voice chat interface built with Vite, React, Tailwin
 
 ## Run locally
 
-1. Copy `.env.example` to `.env`. Set `OPENAI_BASE_URL` to the Myna OpenAI-compatible API endpoint (normally ending in `/v1`); set `VITE_MYNA_BASE_URL` when the Myna login site is not inferred correctly.
+1. Copy `.env.example` to `.env`. Set `OPENAI_BASE_URL` to the Myna OpenAI-compatible API endpoint (normally ending in `/v1`); set `VITE_MYNA_BASE_URL` when the Myna site is not inferred correctly. Set `VITE_MYNA_OAUTH_CLIENT_ID` to an enabled Myna OAuth public client with `profile:read`, `token_base:read`, `token_base:write`, and `offline_access`.
 2. Set the supported audio models in `.env` if your provider differs from the defaults: `gpt-4o-mini-transcribe` and `gpt-audio-mini`.
 3. Run `npm install`.
 4. Run `npm run dev` and open `http://localhost:5173`.
 
 If the local API port is already in use, run `PORT=8788 VOICECHAT_API_PORT=8788 npm run dev`; Vite will proxy WebSocket traffic to that API instance.
 
-Sign in with a Myna account before chatting. VoiceChat loads the user's active Token Base tokens and automatically creates a `voicechat-<timestamp>` token when none exists. The selected token authorizes every AI call for the WebSocket session. The chat-model selector contains only models configured for the Responses API.
+Authorize VoiceChat with a Myna account before chatting. Desktop browsers open Myna authorization in a new window and use the default close behavior. WeChat and popup-blocked browsers authorize in the current tab and require the OAuth client to have this application's HTTPS address configured as its `return_url`. VoiceChat loads the user's active Token Base tokens and automatically creates a `voicechat-<timestamp>` token when none exists. The selected token authorizes every AI call for the WebSocket session. The chat-model selector contains only models configured for the Responses API.
 
 Speak naturally after starting a session. The browser sends 16 kHz mono PCM16 microphone frames over one WebSocket connection; the Node service runs Silero v5 VAD and sends a turn after a short pause. The in-app audio-response selector defaults to `direct`. In `direct` mode, it sends that WAV turn to one streaming `gpt-audio-mini` request to generate both the reply text and PCM voice response, while `gpt-4o-mini-transcribe` updates the visible transcript independently. In `two_stage` mode, the service first transcribes the turn, generates a text reply with the selected Responses model, then streams synthesized PCM speech from `OPENAI_AUDIO_MODEL`.
 
