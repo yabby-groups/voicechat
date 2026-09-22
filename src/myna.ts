@@ -231,6 +231,10 @@ function clearPendingAuthorization() {
   sessionStorage.removeItem(PENDING_DEVICE_AUTHORIZATION_STORAGE_KEY);
 }
 
+export function hasPendingDeviceAuthorization() {
+  return Boolean(getPendingAuthorization());
+}
+
 export async function beginDeviceAuthorization(completionAction?: "return") {
   const clientId = requireOAuthClientId();
   const metadata = await oauthMetadata();
@@ -265,8 +269,9 @@ export async function resumeDeviceAuthorization() {
   if (!pending) return null;
   const metadata = await oauthMetadata();
   let interval = pending.interval;
+  let waitBeforeNextPoll = false;
   while (Date.now() < pending.expiresAt) {
-    await wait(interval * 1000);
+    if (waitBeforeNextPoll) await wait(interval * 1000);
     try {
       const token = await oauthForm<OAuthTokenResponse>(metadata.token_endpoint, new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -278,9 +283,13 @@ export async function resumeDeviceAuthorization() {
       return session;
     } catch (error) {
       const code = (error as Error & { code?: string }).code;
-      if (code === "authorization_pending") continue;
+      if (code === "authorization_pending") {
+        waitBeforeNextPoll = true;
+        continue;
+      }
       if (code === "slow_down") {
         interval += 5;
+        waitBeforeNextPoll = true;
         continue;
       }
       clearPendingAuthorization();

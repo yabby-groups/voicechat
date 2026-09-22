@@ -22,6 +22,7 @@ import {
   clearAuthToken,
   createVoicechatToken,
   getCurrentUser,
+  hasPendingDeviceAuthorization,
   getStoredAudioResponseMode,
   getStoredModel,
   getStoredTokenId,
@@ -168,7 +169,9 @@ export default function App() {
   );
   const [accountLoading, setAccountLoading] = useState(true);
   const [accountError, setAccountError] = useState("");
-  const [loginInProgress, setLoginInProgress] = useState(false);
+  const [loginInProgress, setLoginInProgress] = useState(
+    hasPendingDeviceAuthorization,
+  );
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [toolActivity, setToolActivity] = useState("");
   const historyRef = useRef(messages);
@@ -190,7 +193,7 @@ export default function App() {
   const pendingActionRef = useRef<PendingAction | null>(
     getStoredPendingAction(),
   );
-  const loginInProgressRef = useRef(false);
+  const loginInProgressRef = useRef(loginInProgress);
   const selectedToken =
     apiTokens.find((token) => token.id === selectedTokenId) || null;
   const userName =
@@ -260,7 +263,11 @@ export default function App() {
           );
         }
       } finally {
-        if (active) setAuthReady(true);
+        if (active) {
+          loginInProgressRef.current = false;
+          setLoginInProgress(false);
+          setAuthReady(true);
+        }
       }
     };
     void restoreAuthorization();
@@ -862,8 +869,9 @@ export default function App() {
                 className="login-button"
                 onClick={beginLogin}
                 disabled={!authReady || loginInProgress}
+                aria-busy={loginInProgress}
               >
-                <LogIn size={16} /> Login
+                <LogIn size={16} /> {loginInProgress ? "Completing sign-in..." : "Login"}
               </button>
             )}
           </div>
