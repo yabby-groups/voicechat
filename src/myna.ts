@@ -3,6 +3,10 @@ export type MynaUser = {
   uid?: number;
   name?: string;
   nick_name?: string;
+  profile?: {
+    avatar_url?: string;
+    nick_name?: string;
+  };
 };
 
 type OAuthServerMetadata = {
@@ -348,7 +352,9 @@ export function storeAudioResponseMode(mode: AudioResponseMode) {
 }
 
 export function getCurrentUser(authToken: string) {
-  return request<MynaUser>("/api/user/me/", {}, authToken);
+  return request<{ user?: MynaUser }>("/api/user/me/", {}, authToken).then(
+    (result): MynaUser => result.user || {},
+  );
 }
 
 export function listMyTokens(authToken: string) {

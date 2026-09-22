@@ -193,6 +193,10 @@ export default function App() {
   const loginInProgressRef = useRef(false);
   const selectedToken =
     apiTokens.find((token) => token.id === selectedTokenId) || null;
+  const userName =
+    user?.profile?.nick_name || user?.nick_name || user?.name || "Myna account";
+  const userInitial = userName.trim().charAt(0).toUpperCase() || "M";
+  const userAvatarUrl = user?.profile?.avatar_url?.trim();
   const effectiveAudioResponseMode: AudioResponseMode = webSearchEnabled
     ? "two_stage"
     : audioResponseMode;
@@ -823,8 +827,15 @@ export default function App() {
             </span>
             {authToken ? (
               <>
-                <span className="hidden sm:inline">
-                  {user?.nick_name || user?.name || "Myna account"}
+                <span className="account-identity" title={userName}>
+                  <span className="account-avatar" aria-hidden="true">
+                    {userAvatarUrl ? (
+                      <img src={userAvatarUrl} alt="" />
+                    ) : (
+                      userInitial
+                    )}
+                  </span>
+                  <span className="hidden sm:inline">{userName}</span>
                 </span>
                 <span className="status-dot status-dot-active" />
                 <button
