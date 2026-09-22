@@ -3,6 +3,7 @@ import {
   AudioLines,
   Bot,
   LoaderCircle,
+  LogIn,
   MessageSquare,
   Mic,
   Send,
@@ -15,7 +16,6 @@ import {
   X,
 } from "lucide-react";
 import type { ChatMessage, VoiceStatus } from "./types";
-import LoginScreen from "./LoginScreen";
 import {
   apiKeyFor,
   beginDeviceAuthorization,
@@ -43,6 +43,7 @@ import {
 const STORAGE_KEY = "echo-voicechat-history-v1";
 const VOICE_STORAGE_KEY = "echo-voicechat-voice-v1";
 const LANGUAGE_STORAGE_KEY = "echo-voicechat-language-v1";
+const PENDING_ACTION_STORAGE_KEY = "echo-voicechat-pending-action-v1";
 const VOICE_OPTIONS = [
   "alloy",
   "ash",
@@ -60,6 +61,7 @@ const VOICE_OPTIONS = [
 ] as const;
 type LanguagePreference = "auto" | "zh" | "en";
 type MobileTab = "voice" | "chat";
+type PendingAction = { type: "send"; text: string } | { type: "voice" };
 const initialMessage: ChatMessage = {
   id: "welcome",
   role: "assistant",
@@ -84,6 +86,26 @@ function getStoredVoice() {
 function getStoredLanguage(): LanguagePreference {
   const language = localStorage.getItem(LANGUAGE_STORAGE_KEY);
   return language === "zh" || language === "en" ? language : "auto";
+}
+
+function getStoredPendingAction(): PendingAction | null {
+  try {
+    const action = JSON.parse(
+      sessionStorage.getItem(PENDING_ACTION_STORAGE_KEY) || "null",
+    ) as Partial<PendingAction> | null;
+    if (action?.type === "voice") return { type: "voice" };
+    if (
+      action?.type === "send" &&
+      typeof action.text === "string" &&
+      action.text.trim()
+    ) {
+      return { type: "send", text: action.text };
+    }
+  } catch {
+    // Ignore malformed session state from an interrupted authorization.
+  }
+  sessionStorage.removeItem(PENDING_ACTION_STORAGE_KEY);
+  return null;
 }
 
 function labelFor(status: VoiceStatus, toolActivity = "") {
@@ -146,6 +168,7 @@ export default function App() {
   );
   const [accountLoading, setAccountLoading] = useState(true);
   const [accountError, setAccountError] = useState("");
+  const [loginInProgress, setLoginInProgress] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [toolActivity, setToolActivity] = useState("");
   const historyRef = useRef(messages);
@@ -164,11 +187,22 @@ export default function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const captureContextRef = useRef<AudioContext | null>(null);
   const captureNodeRef = useRef<AudioWorkletNode | null>(null);
-  const selectedToken = apiTokens.find((token) => token.id === selectedTokenId) || null;
-  const effectiveAudioResponseMode: AudioResponseMode = webSearchEnabled ? "two_stage" : audioResponseMode;
-  const canStartSession = Boolean(
-    selectedToken && !accountLoading && (effectiveAudioResponseMode === "direct" || selectedModel),
+  const pendingActionRef = useRef<PendingAction | null>(
+    getStoredPendingAction(),
   );
+  const loginInProgressRef = useRef(false);
+  const selectedToken =
+    apiTokens.find((token) => token.id === selectedTokenId) || null;
+  const effectiveAudioResponseMode: AudioResponseMode = webSearchEnabled
+    ? "two_stage"
+    : audioResponseMode;
+  const canStartSession = Boolean(
+    selectedToken &&
+    !accountLoading &&
+    (effectiveAudioResponseMode === "direct" || selectedModel),
+  );
+  const canRequestSession =
+    authReady && (authToken ? canStartSession : !loginInProgress);
 
   useEffect(() => {
     historyRef.current = messages;
@@ -212,15 +246,23 @@ export default function App() {
         const pendingSession = await resumeDeviceAuthorization();
         if (pendingSession && active) setAuthToken(pendingSession.accessToken);
       } catch (caught) {
+        pendingActionRef.current = null;
+        sessionStorage.removeItem(PENDING_ACTION_STORAGE_KEY);
         if (active) {
-          setAccountError(caught instanceof Error ? caught.message : "Unable to restore authorization.");
+          setAccountError(
+            caught instanceof Error
+              ? caught.message
+              : "Unable to restore authorization.",
+          );
         }
       } finally {
         if (active) setAuthReady(true);
       }
     };
     void restoreAuthorization();
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, []);
   useEffect(() => {
     if (!authReady) return;
@@ -241,21 +283,31 @@ export default function App() {
           listMyTokens(authToken),
           listResponseModels().catch(() => ({ models: [] })),
         ]);
-        let tokens = (tokenResult.tokens || []).filter((token) => token.status === 1 && token.token_key);
+        let tokens = (tokenResult.tokens || []).filter(
+          (token) => token.status === 1 && token.token_key,
+        );
         if (tokens.length === 0) {
           const created = await createVoicechatToken(authToken);
-          if (!created.token?.token_key) throw new Error("Token creation completed without a token key.");
+          if (!created.token?.token_key)
+            throw new Error("Token creation completed without a token key.");
           tokens = [created.token];
         }
         const responseModels = (modelResult.models || []).filter(
-          (model) => Number(model.enabled) === 1 && Boolean(model.alias) && supportsResponses(model),
+          (model) =>
+            Number(model.enabled) === 1 &&
+            Boolean(model.alias) &&
+            supportsResponses(model),
         );
         if (!active) return;
         setUser(currentUser);
         setApiTokens(tokens);
         setModels(responseModels);
-        const nextToken = tokens.some((token) => token.id === selectedTokenId) ? selectedTokenId : tokens[0].id;
-        const nextModel = responseModels.some((model) => model.alias === selectedModel)
+        const nextToken = tokens.some((token) => token.id === selectedTokenId)
+          ? selectedTokenId
+          : tokens[0].id;
+        const nextModel = responseModels.some(
+          (model) => model.alias === selectedModel,
+        )
           ? selectedModel
           : responseModels[0]?.alias || "";
         setSelectedTokenId(nextToken);
@@ -264,7 +316,10 @@ export default function App() {
         storeModel(nextModel);
       } catch (caught) {
         if (!active) return;
-        const message = caught instanceof Error ? caught.message : "Unable to load your Myna account.";
+        const message =
+          caught instanceof Error
+            ? caught.message
+            : "Unable to load your Myna account.";
         if (message === "Unauthorized") {
           clearAuthToken();
           setAuthToken("");
@@ -276,28 +331,39 @@ export default function App() {
       }
     };
     void loadAccount();
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [authReady, authToken]);
   useEffect(() => {
     let active = true;
     void fetch("/api/health")
-      .then((response) => response.ok ? response.json() : null)
+      .then((response) => (response.ok ? response.json() : null))
       .then((health: { webSearchEnabled?: boolean } | null) => {
         if (active) setWebSearchEnabled(Boolean(health?.webSearchEnabled));
       })
       .catch(() => undefined);
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, []);
 
-  const addMessage = useCallback((message: ChatMessage, beforeMessageId?: string) => {
-    setMessages((current) => {
-      const beforeIndex = beforeMessageId
-        ? current.findIndex((item) => item.id === beforeMessageId)
-        : -1;
-      if (beforeIndex < 0) return [...current, message];
-      return [...current.slice(0, beforeIndex), message, ...current.slice(beforeIndex)];
-    });
-  }, []);
+  const addMessage = useCallback(
+    (message: ChatMessage, beforeMessageId?: string) => {
+      setMessages((current) => {
+        const beforeIndex = beforeMessageId
+          ? current.findIndex((item) => item.id === beforeMessageId)
+          : -1;
+        if (beforeIndex < 0) return [...current, message];
+        return [
+          ...current.slice(0, beforeIndex),
+          message,
+          ...current.slice(beforeIndex),
+        ];
+      });
+    },
+    [],
+  );
 
   const stopMicrophone = useCallback(() => {
     captureNodeRef.current?.disconnect();
@@ -348,8 +414,13 @@ export default function App() {
 
   const connectSocket = useCallback(async () => {
     if (socketReadyRef.current) return socketReadyRef.current;
-    if (!selectedToken || (effectiveAudioResponseMode === "two_stage" && !selectedModel)) {
-      throw new Error("Choose an API token and, for two-stage replies, a Responses chat model first.");
+    if (
+      !selectedToken ||
+      (effectiveAudioResponseMode === "two_stage" && !selectedModel)
+    ) {
+      throw new Error(
+        "Choose an API token and, for two-stage replies, a Responses chat model first.",
+      );
     }
     assistantMessageIdsByTurnRef.current.clear();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -368,7 +439,8 @@ export default function App() {
           language: languagePreference,
           history: historyRef.current,
           apiKey: apiKeyFor(selectedToken),
-          chatModel: effectiveAudioResponseMode === "two_stage" ? selectedModel : "",
+          chatModel:
+            effectiveAudioResponseMode === "two_stage" ? selectedModel : "",
           audioResponseMode: effectiveAudioResponseMode,
         }),
       );
@@ -402,20 +474,27 @@ export default function App() {
         return;
       }
       if (message.type === "tool_call") {
-        setToolActivity(message.label ? `Searching with ${message.label}` : "Searching the web");
+        setToolActivity(
+          message.label
+            ? `Searching with ${message.label}`
+            : "Searching the web",
+        );
         return;
       }
       if (message.type === "transcript" && message.text) {
         const messageId = crypto.randomUUID();
-        addMessage({
-          id: messageId,
-          role: "user",
-          text: message.text,
-          createdAt: new Date().toISOString(),
-          language: message.language,
-        }, message.turnId === undefined
-          ? undefined
-          : assistantMessageIdsByTurnRef.current.get(message.turnId));
+        addMessage(
+          {
+            id: messageId,
+            role: "user",
+            text: message.text,
+            createdAt: new Date().toISOString(),
+            language: message.language,
+          },
+          message.turnId === undefined
+            ? undefined
+            : assistantMessageIdsByTurnRef.current.get(message.turnId),
+        );
         return;
       }
       if (message.type === "complete" && message.assistantText) {
@@ -589,23 +668,55 @@ export default function App() {
   };
 
   const login = async () => {
+    if (authToken || loginInProgressRef.current) return;
+    loginInProgressRef.current = true;
+    setLoginInProgress(true);
+    setAccountError("");
     const inWeChat = /MicroMessenger/i.test(navigator.userAgent);
     const loginWindow = inWeChat ? null : window.open("", "_blank");
     const useSameTab = inWeChat || !loginWindow;
     let authorization;
     try {
-      authorization = await beginDeviceAuthorization(useSameTab ? "return" : undefined);
+      authorization = await beginDeviceAuthorization(
+        useSameTab ? "return" : undefined,
+      );
     } catch (error) {
       loginWindow?.close();
+      loginInProgressRef.current = false;
+      setLoginInProgress(false);
       throw error;
     }
     if (useSameTab) {
-      window.location.assign(authorization.verificationUriComplete || authorization.verificationUri);
+      window.location.assign(
+        authorization.verificationUriComplete || authorization.verificationUri,
+      );
       return;
     }
-    loginWindow.location.replace(authorization.verificationUriComplete || authorization.verificationUri);
-    const session = await resumeDeviceAuthorization();
-    if (session) setAuthToken(session.accessToken);
+    loginWindow.location.replace(
+      authorization.verificationUriComplete || authorization.verificationUri,
+    );
+    try {
+      const session = await resumeDeviceAuthorization();
+      if (session) setAuthToken(session.accessToken);
+    } finally {
+      loginInProgressRef.current = false;
+      setLoginInProgress(false);
+    }
+  };
+
+  const rememberPendingAction = (action: PendingAction) => {
+    pendingActionRef.current = action;
+    sessionStorage.setItem(PENDING_ACTION_STORAGE_KEY, JSON.stringify(action));
+  };
+
+  const beginLogin = () => {
+    void login().catch((caught) => {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Unable to start authorization.",
+      );
+    });
   };
 
   const logout = () => {
@@ -646,6 +757,40 @@ export default function App() {
     [addMessage, connectSocket, languagePreference, status, stopMicrophone],
   );
 
+  const requestText = (text: string) => {
+    const normalized = text.trim();
+    if (!normalized || status === "thinking" || status === "speaking") return;
+    if (authToken && canStartSession) {
+      void sendText(normalized);
+      return;
+    }
+    rememberPendingAction({ type: "send", text: normalized });
+    if (!authToken) beginLogin();
+  };
+
+  const requestListening = () => {
+    if (autoListen) {
+      stopListening();
+      return;
+    }
+    if (authToken && canStartSession) {
+      void startListening();
+      return;
+    }
+    rememberPendingAction({ type: "voice" });
+    if (!authToken) beginLogin();
+  };
+
+  useEffect(() => {
+    if (!authReady || !authToken || !canStartSession) return;
+    const action = pendingActionRef.current;
+    if (!action) return;
+    pendingActionRef.current = null;
+    sessionStorage.removeItem(PENDING_ACTION_STORAGE_KEY);
+    if (action.type === "send") void sendText(action.text);
+    else void startListening();
+  }, [authReady, authToken, canStartSession, sendText, startListening]);
+
   const clearConversation = () => {
     setMessages([initialMessage]);
     setError("");
@@ -653,10 +798,6 @@ export default function App() {
       socketRef.current.send(JSON.stringify({ type: "reset" }));
   };
   const isActive = status === "listening" || status === "speaking";
-
-  if (!authToken || accountLoading) {
-    return <LoginScreen loading={accountLoading} error={accountError} onLogin={login} />;
-  }
 
   return (
     <main className="voice-app min-h-screen overflow-x-hidden bg-[#10131b] text-slate-100 selection:bg-teal-200 selection:text-slate-950">
@@ -677,22 +818,43 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span className="privacy-notice">Your conversation is kept in this browser.</span>
-            <span className="hidden sm:inline">{user?.nick_name || user?.name || "Myna account"}</span>
-            <span className="status-dot status-dot-active" />
-            <button
-              className="settings-button"
-              onClick={() => setSettingsOpen(true)}
-              aria-controls="voice-settings"
-              aria-expanded={settingsOpen}
-              aria-label="Open settings"
-              title="Settings"
-            >
-              <SlidersHorizontal size={16} />
-            </button>
-            <button className="logout-button" onClick={logout} title="Sign out" aria-label="Sign out">
-              <LogOut size={16} />
-            </button>
+            <span className="privacy-notice">
+              Your conversation is kept in this browser.
+            </span>
+            {authToken ? (
+              <>
+                <span className="hidden sm:inline">
+                  {user?.nick_name || user?.name || "Myna account"}
+                </span>
+                <span className="status-dot status-dot-active" />
+                <button
+                  className="settings-button"
+                  onClick={() => setSettingsOpen(true)}
+                  aria-controls="voice-settings"
+                  aria-expanded={settingsOpen}
+                  aria-label="Open settings"
+                  title="Settings"
+                >
+                  <SlidersHorizontal size={16} />
+                </button>
+                <button
+                  className="logout-button"
+                  onClick={logout}
+                  title="Sign out"
+                  aria-label="Sign out"
+                >
+                  <LogOut size={16} />
+                </button>
+              </>
+            ) : (
+              <button
+                className="login-button"
+                onClick={beginLogin}
+                disabled={!authReady || loginInProgress}
+              >
+                <LogIn size={16} /> Login
+              </button>
+            )}
           </div>
         </header>
         <div
@@ -735,7 +897,9 @@ export default function App() {
                 />
                 <div>
                   <p className="text-sm font-medium text-slate-100">Echo</p>
-                  <p className="text-xs text-slate-400">{labelFor(status, toolActivity)}</p>
+                  <p className="text-xs text-slate-400">
+                    {labelFor(status, toolActivity)}
+                  </p>
                 </div>
               </div>
               <button onClick={clearConversation} className="clear-button">
@@ -775,10 +939,8 @@ export default function App() {
             <div className="border-t border-white/10 bg-black/10 p-4 sm:p-5">
               <div className="flex items-center gap-3">
                 <button
-                  disabled={isStarting || !canStartSession}
-                  onClick={() =>
-                    autoListen ? stopListening() : void startListening()
-                  }
+                  disabled={isStarting || !canRequestSession}
+                  onClick={requestListening}
                   className={`mic-button ${autoListen ? "mic-button-active" : ""}`}
                   title={
                     autoListen ? "Stop listening" : "Start continuous listening"
@@ -798,7 +960,7 @@ export default function App() {
                 <form
                   onSubmit={(event) => {
                     event.preventDefault();
-                    void sendText(draft);
+                    requestText(draft);
                   }}
                   className="message-composer"
                 >
@@ -815,7 +977,12 @@ export default function App() {
                     }
                   />
                   <button
-                    disabled={!draft.trim() || status === "thinking" || isStarting || !canStartSession}
+                    disabled={
+                      !draft.trim() ||
+                      status === "thinking" ||
+                      isStarting ||
+                      !canRequestSession
+                    }
                     className="send-button"
                     aria-label="Send text message"
                   >
@@ -869,7 +1036,9 @@ export default function App() {
               </div>
               <Waveform status={status} />
               <p className="mt-7 text-sm font-medium text-slate-100">
-                {isStarting ? "Starting microphone..." : labelFor(status, toolActivity)}
+                {isStarting
+                  ? "Starting microphone..."
+                  : labelFor(status, toolActivity)}
               </p>
               <p className="mt-2 max-w-56 text-center text-xs leading-5 text-slate-500">
                 {isStarting
@@ -896,10 +1065,8 @@ export default function App() {
                 </p>
               )}
               <button
-                disabled={isStarting || !canStartSession}
-                onClick={() =>
-                  autoListen ? stopListening() : void startListening()
-                }
+                disabled={isStarting || !canRequestSession}
+                onClick={requestListening}
                 className={`mobile-session-button ${autoListen ? "session-button-stop" : ""}`}
               >
                 {isStarting ? (
@@ -919,15 +1086,14 @@ export default function App() {
               </button>
             </div>
             <button
-              disabled={isStarting || !canStartSession}
-              onClick={() =>
-                autoListen ? stopListening() : void startListening()
-              }
+              disabled={isStarting || !canRequestSession}
+              onClick={requestListening}
               className={`session-button main-session-button ${autoListen ? "session-button-stop" : ""}`}
             >
               {isStarting ? (
                 <>
-                  <LoaderCircle size={17} className="animate-spin" /> Starting... {startupProgress}%
+                  <LoaderCircle size={17} className="animate-spin" />{" "}
+                  Starting... {startupProgress}%
                 </>
               ) : autoListen ? (
                 <>
@@ -958,7 +1124,11 @@ export default function App() {
                   <span>Audio response</span>
                   <select
                     value={effectiveAudioResponseMode}
-                    onChange={(event) => changeAudioResponseMode(event.target.value as AudioResponseMode)}
+                    onChange={(event) =>
+                      changeAudioResponseMode(
+                        event.target.value as AudioResponseMode,
+                      )
+                    }
                     disabled={isStarting || webSearchEnabled}
                   >
                     <option value="direct">Direct audio</option>
@@ -984,11 +1154,15 @@ export default function App() {
                   <span>API token</span>
                   <select
                     value={selectedTokenId}
-                    onChange={(event) => changeToken(Number(event.target.value))}
+                    onChange={(event) =>
+                      changeToken(Number(event.target.value))
+                    }
                     disabled={isStarting || apiTokens.length === 0}
                   >
                     {apiTokens.map((token) => (
-                      <option key={token.id} value={token.id}>{token.token_name || `token-${token.id}`}</option>
+                      <option key={token.id} value={token.id}>
+                        {token.token_name || `token-${token.id}`}
+                      </option>
                     ))}
                   </select>
                 </label>
@@ -1001,7 +1175,9 @@ export default function App() {
                       disabled={isStarting || models.length === 0}
                     >
                       {models.map((model) => (
-                        <option key={model.id} value={model.alias}>{model.title || model.alias}</option>
+                        <option key={model.id} value={model.alias}>
+                          {model.title || model.alias}
+                        </option>
                       ))}
                     </select>
                   </label>
