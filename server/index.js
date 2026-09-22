@@ -66,7 +66,7 @@ wss.on('connection', (socket) => {
   socket.on('error', (error) => log('socket_error', error.message));
 });
 
-server.listen(port, '127.0.0.1', () => console.log(`Voicechat API listening on http://127.0.0.1:${port}`));
+server.listen(port, '0.0.0.0', () => console.log(`Voicechat API listening on http://0.0.0.0:${port}`));
 server.on('error', (error) => {
   console.error('Voicechat API server error:', error);
   process.exitCode = 1;

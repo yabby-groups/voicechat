@@ -30,4 +30,24 @@ When enabled, Echo uses the two-stage Responses path for every turn so the model
 - `npm test`: run server-side unit tests.
 - `npm start`: run the API service on `PORT` (default `8787`).
 
+## Docker
+
+Build the image with the public Myna settings that Vite must embed in the browser bundle:
+
+```sh
+docker build \
+  --build-arg VITE_MYNA_BASE_URL=https://myna.example.com \
+  --build-arg VITE_MYNA_OAUTH_CLIENT_ID=your-public-client-id \
+  -t echo-voicechat .
+```
+
+Pass server-only configuration at runtime. Do not pass browser-visible `VITE_` values with `docker run` because the frontend has already been built.
+
+```sh
+docker run --rm -p 8787:8787 \
+  -e OPENAI_BASE_URL=https://myna.example.com/v1 \
+  -e PORT=8787 \
+  echo-voicechat
+```
+
 Conversation text is retained only in this browser's local storage. The server keeps the active conversation only for the lifetime of the WebSocket connection. Audio is sent to the configured OpenAI service to create each reply and is not persisted by this application.
